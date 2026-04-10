@@ -38,10 +38,12 @@ torch.compile is NOT enabled by default and is generally not worth it here:
 """
 
 import json
+import random
 import argparse
 import subprocess
 import numpy as np
 from pathlib import Path
+from collections import defaultdict
 
 import torch
 from torch.utils.data import IterableDataset
@@ -90,6 +92,66 @@ def count_jsonl_lines(path: Path) -> int:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             count += chunk.count(b"\n")
     return count
+
+
+# ---------------------------------------------------------------------------
+# Stratified training sample (5% / 10% of train.jsonl)
+# ---------------------------------------------------------------------------
+
+def create_stratified_train_sample(
+    train_path: Path,
+    fraction: float,
+    seed: int,
+    out_path: Path,
+) -> Path:
+    """
+    Read train.jsonl, take a stratified sample by source field, write to
+    out_path (e.g. data/train_5p.jsonl).
+
+    Why stratified by source:
+      Different source datasets have different entity-type distributions.
+      Uniform random sampling would under-represent minority sources.
+      Stratifying preserves the per-source ratio in the sample.
+
+    Memory note:
+      Stores raw JSON lines (strings) grouped by source — no full object
+      deserialization. For 880k lines at ~300 bytes each that is ~264 MB,
+      well within the headroom of a 16 GB V100 before model is loaded.
+
+    Returns out_path so the caller can feed it straight to PIIIterableDataset.
+    """
+    print(f"\n  Creating stratified {fraction:.0%} training sample from {train_path} ...")
+    by_source: dict[str, list[str]] = defaultdict(list)
+    with open(train_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            # parse only enough to get the source key
+            rec = json.loads(line)
+            by_source[rec.get("source", "unknown")].append(line)
+
+    rng = random.Random(seed)
+    sampled: list[str] = []
+    print(f"  {'Source':<30} {'Total':>8} {'Sampled':>8}")
+    print(f"  {'-'*30} {'-'*8} {'-'*8}")
+    for source, lines in sorted(by_source.items()):
+        n = max(1, int(len(lines) * fraction))
+        chosen = rng.sample(lines, min(n, len(lines)))
+        sampled.extend(chosen)
+        print(f"  {source:<30} {len(lines):>8,} {len(chosen):>8,}")
+    print(f"  {'-'*30} {'-'*8} {'-'*8}")
+    print(f"  {'TOTAL':<30} {sum(len(v) for v in by_source.values()):>8,} {len(sampled):>8,}")
+
+    rng.shuffle(sampled)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        for line in sampled:
+            f.write(line + "\n")
+
+    size_mb = out_path.stat().st_size / 1e6
+    print(f"  Saved -> {out_path} ({size_mb:.1f} MB)")
+    return out_path
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +400,8 @@ class PIITrainer:
         pretokenized_dir: Path           = PRETOKENIZED_DIR,
         eval_accumulation_steps: int     = 1,
         prediction_loss_only: bool       = False,
+        train_sample_fraction: float     = 0.0,
+        skip_final_eval: bool            = False,
     ):
         self.batch_size                  = batch_size
         self.eval_batch_size             = eval_batch_size
@@ -360,6 +424,8 @@ class PIITrainer:
         self.pretokenized_dir            = pretokenized_dir
         self.eval_accumulation_steps     = eval_accumulation_steps
         self.prediction_loss_only        = prediction_loss_only
+        self.train_sample_fraction       = train_sample_fraction
+        self.skip_final_eval             = skip_final_eval
 
         # Label mapping
         with open(DATA_DIR / "label_mapping.json") as f:
@@ -448,18 +514,41 @@ class PIITrainer:
 
     def load_datasets(self):
         """
-        Training always streams from train.jsonl (full, 1.1M records).
+        Training streams from train.jsonl (full) or a stratified sample of it.
+        Pass --train-sample-fraction 0.05 to use 5% of training data
+        (stratified by source), or 0.10 for 10%.  The sampled file is written
+        to data/train_Xp.jsonl so it can be inspected and reused.
+
         Intra-training eval uses val_1p (Arrow or streaming JSONL, ~1,400 records).
-        Final eval (called after training) uses the full test.jsonl via streaming.
+        Final eval (called after training) uses the full test.jsonl via streaming,
+        unless --skip-final-eval is set (recommended when you only want weights).
         """
         print("\nLoading datasets ...")
 
+        # Resolve which training file to stream
+        base_train_path = DATA_DIR / "train.jsonl"
+        if self.train_sample_fraction > 0.0:
+            pct = int(round(self.train_sample_fraction * 100))
+            sampled_path = DATA_DIR / f"train_{pct}p.jsonl"
+            if sampled_path.exists():
+                print(f"  Re-using existing stratified sample: {sampled_path}")
+            else:
+                create_stratified_train_sample(
+                    train_path=base_train_path,
+                    fraction=self.train_sample_fraction,
+                    seed=SEED,
+                    out_path=sampled_path,
+                )
+            train_path = sampled_path
+        else:
+            train_path = base_train_path
+
         # Training dataset — always streaming, never loaded into RAM
         self.train_ds = PIIIterableDataset(
-            DATA_DIR / "train.jsonl", self.tokenizer, self.label2id, self.max_length
+            train_path, self.tokenizer, self.label2id, self.max_length
         )
         print("  Counting training lines (byte scan) ...")
-        self.train_line_count = count_jsonl_lines(DATA_DIR / "train.jsonl")
+        self.train_line_count = count_jsonl_lines(train_path)
         print(f"  Train (streaming): {self.train_line_count:,}")
 
         # Intra-training eval dataset — val_1p (~1% of val, ~1,400 records)
@@ -791,6 +880,27 @@ def main():
         default=str(PRETOKENIZED_DIR),
         help=f"Directory for Arrow datasets (default: {PRETOKENIZED_DIR}).",
     )
+    parser.add_argument(
+        "--train-sample-fraction",
+        type=float,
+        default=0.0,
+        help=(
+            "Fraction of train.jsonl to use for training, stratified by source. "
+            "0.05 = 5%% (~44k records from 880k), 0.10 = 10%% (~88k records). "
+            "The sampled file is written to data/train_Xp.jsonl and reused on "
+            "subsequent runs. Set to 0 (default) to use the full training set."
+        ),
+    )
+    parser.add_argument(
+        "--skip-final-eval",
+        action="store_true",
+        help=(
+            "Skip final evaluation on the full test set after training. "
+            "Use when you only need the trained weights (models/best_model/) "
+            "and want to run inference locally instead of evaluating on the "
+            "full test split here."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -816,6 +926,8 @@ def main():
         pretokenized_dir=Path(args.pretokenized_dir),
         eval_accumulation_steps=args.eval_accumulation_steps,
         prediction_loss_only=args.prediction_loss_only,
+        train_sample_fraction=args.train_sample_fraction,
+        skip_final_eval=args.skip_final_eval,
     )
 
     if args.pretokenize_only:
@@ -824,7 +936,11 @@ def main():
 
     pii_trainer.load_datasets()
     trainer = pii_trainer.train()
-    pii_trainer.evaluate(trainer)
+    if not pii_trainer.skip_final_eval:
+        pii_trainer.evaluate(trainer)
+    else:
+        print("\nSkipping final test evaluation (--skip-final-eval set).")
+        print(f"Best model weights saved to: {MODELS_DIR / 'best_model'}")
 
 
 if __name__ == "__main__":

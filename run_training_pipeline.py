@@ -67,6 +67,8 @@ def run_pipeline(
     use_pretokenized: bool = False,
     pretokenized_dir: Path = PRETOKENIZED_DIR,
     pretokenize_num_proc: int = 4,
+    train_sample_fraction: float = 0.0,
+    skip_final_eval: bool = False,
 ):
     print("=" * 80)
     print("PII DETECTION — TRAINING PIPELINE")
@@ -112,6 +114,8 @@ def run_pipeline(
         prediction_loss_only=prediction_loss_only,
         use_pretokenized=use_pretokenized,
         pretokenized_dir=pretokenized_dir,
+        train_sample_fraction=train_sample_fraction,
+        skip_final_eval=skip_final_eval,
     )
 
     if pretokenize_only:
@@ -121,7 +125,13 @@ def run_pipeline(
 
     trainer.load_datasets()
     hf_trainer = trainer.train()
-    results = trainer.evaluate(hf_trainer)
+
+    if not skip_final_eval:
+        results = trainer.evaluate(hf_trainer)
+    else:
+        results = {}
+        print("\nSkipping final test evaluation (--skip-final-eval set).")
+        print("  Best model weights saved to: ./models/best_model")
 
     # ------------------------------------------------------------------
     # Summary
@@ -130,10 +140,11 @@ def run_pipeline(
     print("TRAINING PIPELINE COMPLETE")
     print("=" * 80)
     print("  Best model        : ./models/best_model")
-    print("  Evaluation results: ./models/evaluation_results.json")
-    print(f"  Test F1           : {results.get('test_f1', 0):.4f}")
-    print(f"  Test Precision    : {results.get('test_precision', 0):.4f}")
-    print(f"  Test Recall       : {results.get('test_recall', 0):.4f}")
+    if not skip_final_eval:
+        print("  Evaluation results: ./models/evaluation_results.json")
+        print(f"  Test F1           : {results.get('test_f1', 0):.4f}")
+        print(f"  Test Precision    : {results.get('test_precision', 0):.4f}")
+        print(f"  Test Recall       : {results.get('test_recall', 0):.4f}")
     print("\nNext step: python src/api.py --model-path ./models/best_model")
 
     return results
@@ -236,6 +247,26 @@ def main():
         default=str(PRETOKENIZED_DIR),
         help=f"Directory for Arrow datasets (default: {PRETOKENIZED_DIR}).",
     )
+    parser.add_argument(
+        "--train-sample-fraction",
+        type=float,
+        default=0.0,
+        help=(
+            "Fraction of train.jsonl to use, stratified by source. "
+            "0.05 = 5%% (~44k records), 0.10 = 10%% (~88k records). "
+            "Saved to data/train_Xp.jsonl and reused on subsequent runs. "
+            "Default 0 uses the full training set."
+        ),
+    )
+    parser.add_argument(
+        "--skip-final-eval",
+        action="store_true",
+        help=(
+            "Skip final evaluation on the full test set. "
+            "Use when you only need the trained weights (models/best_model/) "
+            "and plan to run inference locally."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -264,6 +295,8 @@ def main():
         use_pretokenized=args.use_pretokenized,
         pretokenized_dir=Path(args.pretokenized_dir),
         pretokenize_num_proc=args.pretokenize_num_proc,
+        train_sample_fraction=args.train_sample_fraction,
+        skip_final_eval=args.skip_final_eval,
     )
 
 
