@@ -43,7 +43,7 @@ import argparse
 import subprocess
 import numpy as np
 from pathlib import Path
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 import torch
 from torch.utils.data import IterableDataset
@@ -76,6 +76,7 @@ HF_MODEL_ID       = "microsoft/deberta-v3-base"
 PRETOKENIZED_DIR  = Path("./data/pretokenized")
 
 SEED              = 42
+SAMPLE_META_SUFFIX = ".meta.json"
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +93,118 @@ def count_jsonl_lines(path: Path) -> int:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             count += chunk.count(b"\n")
     return count
+
+
+def sample_meta_path(sample_path: Path) -> Path:
+    return sample_path.with_name(sample_path.name + SAMPLE_META_SUFFIX)
+
+
+def build_sample_metadata(train_path: Path, fraction: float, seed: int) -> dict:
+    label_mapping_path = DATA_DIR / "label_mapping.json"
+    train_stat = train_path.stat()
+    label_stat = label_mapping_path.stat()
+    return {
+        "train_path": str(train_path.resolve()),
+        "train_size": train_stat.st_size,
+        "train_mtime_ns": train_stat.st_mtime_ns,
+        "label_mapping_path": str(label_mapping_path.resolve()),
+        "label_mapping_size": label_stat.st_size,
+        "label_mapping_mtime_ns": label_stat.st_mtime_ns,
+        "fraction": fraction,
+        "seed": seed,
+    }
+
+
+def should_regenerate_sample(train_path: Path, fraction: float, seed: int, out_path: Path) -> bool:
+    if not out_path.exists():
+        return True
+
+    meta_path = sample_meta_path(out_path)
+    if not meta_path.exists():
+        print(f"  Sample metadata missing for {out_path}; regenerating sample.")
+        return True
+
+    try:
+        with open(meta_path, "r", encoding="utf-8") as f:
+            existing = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        print(f"  Sample metadata unreadable for {out_path}; regenerating sample.")
+        return True
+
+    expected = build_sample_metadata(train_path, fraction, seed)
+    if existing != expected:
+        print(f"  Sample metadata changed for {out_path}; regenerating sample.")
+        return True
+
+    return False
+
+
+def write_sample_metadata(train_path: Path, fraction: float, seed: int, out_path: Path):
+    meta_path = sample_meta_path(out_path)
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(build_sample_metadata(train_path, fraction, seed), f, indent=2)
+
+
+def print_label_distribution(path: Path, title: str, top_k: int = 15):
+    """
+    Print record-level and token-level label statistics from a JSONL file.
+    This makes it obvious when a sampled run is dominated by all-O examples.
+    """
+    record_count = 0
+    all_o_records = 0
+    token_count = 0
+    o_token_count = 0
+    label_counts = Counter()
+    entity_counts = Counter()
+
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            rec = json.loads(line)
+            labels = rec["labels"]
+            record_count += 1
+            token_count += len(labels)
+            has_entity = False
+
+            for label in labels:
+                label_counts[label] += 1
+                if label == "O":
+                    o_token_count += 1
+                else:
+                    has_entity = True
+                    if label.startswith("B-"):
+                        entity_counts[label[2:]] += 1
+
+            if not has_entity:
+                all_o_records += 1
+
+    supervised_tokens = token_count
+    non_o_token_count = supervised_tokens - o_token_count
+    o_ratio = (o_token_count / supervised_tokens) if supervised_tokens else 0.0
+    positive_ratio = (non_o_token_count / supervised_tokens) if supervised_tokens else 0.0
+    all_o_ratio = (all_o_records / record_count) if record_count else 0.0
+
+    print(f"\n  {title}")
+    print(f"    Records                : {record_count:,}")
+    print(f"    All-O records          : {all_o_records:,} ({all_o_ratio:.2%})")
+    print(f"    Supervised tokens      : {supervised_tokens:,}")
+    print(f"    O tokens               : {o_token_count:,} ({o_ratio:.2%})")
+    print(f"    Non-O tokens           : {non_o_token_count:,} ({positive_ratio:.2%})")
+    print(f"    Top raw labels         : {label_counts.most_common(top_k)}")
+    print(f"    Top B-entity mentions  : {entity_counts.most_common(top_k)}")
+
+
+def build_class_weights(label2id: dict, o_label_weight: float, entity_label_weight: float) -> torch.Tensor:
+    """
+    Build token-classification class weights with an intentionally small
+    weight on O so the model cannot minimise loss by predicting only O.
+    """
+    weights = torch.full((len(label2id),), float(entity_label_weight), dtype=torch.float32)
+    if "O" in label2id:
+        weights[label2id["O"]] = float(o_label_weight)
+    return weights
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +261,7 @@ def create_stratified_train_sample(
     with open(out_path, "w", encoding="utf-8") as f:
         for line in sampled:
             f.write(line + "\n")
+    write_sample_metadata(train_path, fraction, seed, out_path)
 
     size_mb = out_path.stat().st_size / 1e6
     print(f"  Saved -> {out_path} ({size_mb:.1f} MB)")
@@ -354,22 +468,71 @@ def make_compute_metrics(id2label: dict):
         predictions = np.argmax(logits, axis=-1)
 
         true_labels, true_preds = [], []
+        gold_o = pred_o = total = 0
+        pred_entity_counts = Counter()
         for pred_seq, label_seq in zip(predictions, label_ids):
             seq_labels, seq_preds = [], []
             for p, l in zip(pred_seq, label_seq):
                 if l == -100:
                     continue
-                seq_labels.append(id2label[int(l)])
-                seq_preds.append(id2label[int(p)])
+                gold_label = id2label[int(l)]
+                pred_label = id2label[int(p)]
+                seq_labels.append(gold_label)
+                seq_preds.append(pred_label)
+                total += 1
+                if gold_label == "O":
+                    gold_o += 1
+                if pred_label == "O":
+                    pred_o += 1
+                elif pred_label.startswith("B-"):
+                    pred_entity_counts[pred_label[2:]] += 1
             true_labels.append(seq_labels)
             true_preds.append(seq_preds)
+
+        gold_o_ratio = (gold_o / total) if total else 0.0
+        pred_o_ratio = (pred_o / total) if total else 0.0
+        print(
+            "  Eval debug -> "
+            f"gold_O={gold_o_ratio:.2%}, pred_O={pred_o_ratio:.2%}, "
+            f"top_pred_B={pred_entity_counts.most_common(8)}"
+        )
 
         return {
             "f1":        f1_score(true_labels, true_preds),
             "precision": precision_score(true_labels, true_preds),
             "recall":    recall_score(true_labels, true_preds),
+            "gold_o_ratio": gold_o_ratio,
+            "pred_o_ratio": pred_o_ratio,
         }
     return compute_metrics
+
+
+class WeightedTokenClassificationTrainer(Trainer):
+    """
+    Overrides the default token-classification loss so we can down-weight O.
+    This is the highest-impact change for preventing all-O collapse.
+    """
+
+    def __init__(self, *args, class_weights: torch.Tensor | None = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.class_weights = class_weights
+
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        labels = inputs.get("labels")
+        outputs = model(**inputs)
+
+        if labels is None:
+            loss = outputs["loss"] if isinstance(outputs, dict) else outputs.loss
+            return (loss, outputs) if return_outputs else loss
+
+        logits = outputs["logits"] if isinstance(outputs, dict) else outputs.logits
+        weight = None
+        if self.class_weights is not None:
+            weight = self.class_weights.to(logits.device)
+
+        loss_fct = torch.nn.CrossEntropyLoss(weight=weight, ignore_index=-100)
+        loss = loss_fct(logits.view(-1, logits.size(-1)), labels.view(-1))
+        return (loss, outputs) if return_outputs else loss
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +565,8 @@ class PIITrainer:
         prediction_loss_only: bool       = False,
         train_sample_fraction: float     = 0.0,
         skip_final_eval: bool            = False,
+        o_label_weight: float            = 0.1,
+        entity_label_weight: float       = 1.0,
     ):
         self.batch_size                  = batch_size
         self.eval_batch_size             = eval_batch_size
@@ -426,6 +591,8 @@ class PIITrainer:
         self.prediction_loss_only        = prediction_loss_only
         self.train_sample_fraction       = train_sample_fraction
         self.skip_final_eval             = skip_final_eval
+        self.o_label_weight              = o_label_weight
+        self.entity_label_weight         = entity_label_weight
 
         # Label mapping
         with open(DATA_DIR / "label_mapping.json") as f:
@@ -462,6 +629,11 @@ class PIITrainer:
 
         self.device   = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.use_bf16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+        self.class_weights = build_class_weights(
+            self.label2id,
+            o_label_weight=self.o_label_weight,
+            entity_label_weight=self.entity_label_weight,
+        )
 
         print(f"Device           : {self.device}")
         print(f"Precision        : {'bf16' if self.use_bf16 else 'fp32'}")
@@ -471,6 +643,10 @@ class PIITrainer:
         print(f"pred_loss_only   : {self.prediction_loss_only}")
         print(f"Grad ckpt        : {'enabled' if self.use_gradient_checkpointing else 'disabled'}")
         print(f"Max length       : {self.max_length}")
+        print(
+            f"Class weights    : O={self.o_label_weight:.3f}, "
+            f"entity={self.entity_label_weight:.3f}"
+        )
         print(f"Dataset mode     : {'val_1p Arrow' if self.use_pretokenized else 'val_1p streaming JSONL'} (intra-training eval)")
         if self.max_steps > 0:
             print(f"Max steps        : {self.max_steps} (overrides epochs)")
@@ -530,15 +706,15 @@ class PIITrainer:
         if self.train_sample_fraction > 0.0:
             pct = int(round(self.train_sample_fraction * 100))
             sampled_path = DATA_DIR / f"train_{pct}p.jsonl"
-            if sampled_path.exists():
-                print(f"  Re-using existing stratified sample: {sampled_path}")
-            else:
+            if should_regenerate_sample(base_train_path, self.train_sample_fraction, SEED, sampled_path):
                 create_stratified_train_sample(
                     train_path=base_train_path,
                     fraction=self.train_sample_fraction,
                     seed=SEED,
                     out_path=sampled_path,
                 )
+            else:
+                print(f"  Re-using fresh stratified sample: {sampled_path}")
             train_path = sampled_path
         else:
             train_path = base_train_path
@@ -550,6 +726,7 @@ class PIITrainer:
         print("  Counting training lines (byte scan) ...")
         self.train_line_count = count_jsonl_lines(train_path)
         print(f"  Train (streaming): {self.train_line_count:,}")
+        print_label_distribution(train_path, "Training label distribution")
 
         # Intra-training eval dataset — val_1p (~1% of val, ~1,400 records)
         if self.use_pretokenized:
@@ -561,6 +738,7 @@ class PIITrainer:
             )
             val_1p_lines = count_jsonl_lines(DATA_DIR / "val_1p.jsonl")
             print(f"  Val eval (streaming val_1p): {val_1p_lines:,} records")
+        print_label_distribution(DATA_DIR / "val_1p.jsonl", "Validation label distribution (val_1p)")
 
         # Full test set — loaded lazily, only used in evaluate() at the end
         # Kept as a streaming dataset to avoid loading 140k records into RAM.
@@ -689,7 +867,7 @@ class PIITrainer:
             max_length=self.max_length,
         )
 
-        trainer = Trainer(
+        trainer = WeightedTokenClassificationTrainer(
             model=self.model,
             args=args,
             train_dataset=self.train_ds,
@@ -697,6 +875,7 @@ class PIITrainer:
             data_collator=collator,
             processing_class=self.tokenizer,
             compute_metrics=make_compute_metrics(self.id2label),
+            class_weights=self.class_weights,
             callbacks=[
                 EarlyStoppingCallback(
                     early_stopping_patience=self.early_stopping_patience
@@ -901,6 +1080,21 @@ def main():
             "full test split here."
         ),
     )
+    parser.add_argument(
+        "--o-label-weight",
+        type=float,
+        default=0.1,
+        help=(
+            "Cross-entropy weight for label O. Lower values penalise the "
+            "all-O solution and encourage entity predictions."
+        ),
+    )
+    parser.add_argument(
+        "--entity-label-weight",
+        type=float,
+        default=1.0,
+        help="Cross-entropy weight for all non-O labels.",
+    )
 
     args = parser.parse_args()
 
@@ -928,6 +1122,8 @@ def main():
         prediction_loss_only=args.prediction_loss_only,
         train_sample_fraction=args.train_sample_fraction,
         skip_final_eval=args.skip_final_eval,
+        o_label_weight=args.o_label_weight,
+        entity_label_weight=args.entity_label_weight,
     )
 
     if args.pretokenize_only:
