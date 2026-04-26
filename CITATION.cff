@@ -1,0 +1,34 @@
+abstract: <p>We present PIIBench, a unified benchmark corpus for Personally Identifiable&nbsp;<br>Information
+  (PII) detection in natural language text. Existing resources for PII&nbsp;<br>detection
+  are fragmented across domain-specific corpora with mutually&nbsp;<br>incompatible
+  annotation schemes, preventing systematic comparison of detection&nbsp;<br>systems.
+  We consolidate ten publicly available datasets spanning synthetic PII&nbsp;<br>corpora,
+  multilingual Named Entity Recognition (NER) benchmarks, and financial<br>domain
+  annotated text, yielding a corpus of 2,369,883 annotated sequences and&nbsp;<br>3.35
+  million entity mentions across 48 canonical PII entity types. We develop a&nbsp;<br>principled
+  normalization pipeline that maps 80+ source-specific label variants to a&nbsp;<br>standardized
+  BIO tagging scheme, applies frequency-based suppression of near<br>absent entity
+  types, and produces stratified 80/10/10 train/validation/test splits&nbsp;<br>preserving
+  source distribution. To establish baseline difficulty, we evaluate eight&nbsp;<br>published
+  systems spanning rule-based engines (Microsoft Presidio), general<br>purpose NER
+  models (spaCy, BERT-base NER, XLM-RoBERTa NER,&nbsp;<br>SpanMarker mBERT, SpanMarker
+  BERT), a PII-specific model (Piiranha&nbsp;<br>DeBERTa), and a financial NER specialist
+  (XtremeDistil FiNER). All systems&nbsp;<br>achieve span-level F1 below 0.14, with
+  the best system (Presidio, F1=0.1385) still&nbsp;<br>producing zero recall on most
+  entity types. These results directly quantify the&nbsp;<br>domain-silo problem and
+  demonstrate that PIIBench presents a substantially&nbsp;<br>harder and more comprehensive
+  evaluation challenge than any existing single<br>source PII dataset. The dataset
+  construction pipeline and benchmark evaluation&nbsp;<br>code are publicly available
+  at https://github.com/pritesh-2711/pii-bench.&nbsp;</p>
+authors:
+- family-names: Jha
+  given-names: Pritesh
+cff-version: 1.2.0
+date-released: '2026-04-12'
+doi: 10.5281/zenodo.19533263
+license:
+- cc-by-4.0
+message: If you use this work, please cite it using the metadata from this file.
+title: 'PIIBench: A Unified Multi-Source Benchmark Corpus for Personally Identifiable
+  Information Detection'
+version: 1.0.0

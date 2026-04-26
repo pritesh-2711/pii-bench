@@ -359,4 +359,4 @@ Pritesh Jha
 
 ## License
 
-MIT
+Apache License version 2.0
