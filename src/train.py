@@ -548,7 +548,7 @@ class PIITrainer:
         learning_rate: float             = 2e-5,
         num_epochs: int                  = 10,
         max_steps: int                   = -1,
-        max_length: int                  = 512,
+        max_length: int                  = 256,
         warmup_ratio: float              = 0.06,
         weight_decay: float              = 0.01,
         early_stopping_patience: int     = 3,
@@ -988,7 +988,7 @@ def main():
     parser.add_argument("--epochs",                  type=int,   default=10)
     parser.add_argument("--max-steps",               type=int,   default=-1,
                         help="Hard step limit. Overrides --epochs when > 0.")
-    parser.add_argument("--max-length",              type=int,   default=512)
+    parser.add_argument("--max-length",              type=int,   default=256)
     parser.add_argument("--lr",                      type=float, default=2e-5)
     parser.add_argument("--warmup-ratio",            type=float, default=0.06)
     parser.add_argument("--weight-decay",            type=float, default=0.01)

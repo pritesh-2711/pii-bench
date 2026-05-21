@@ -22,7 +22,7 @@ Usage:
     python run_training_pipeline.py \
         --batch-size 16 \
         --grad-accum 4 \
-        --max-length 512 \
+        --max-length 256 \
         --epochs 10 \
         --eval-steps 2000 \
         --save-steps 2000 \
@@ -50,7 +50,7 @@ def run_pipeline(
     learning_rate: float = 2e-5,
     num_epochs: int = 10,
     max_steps: int = -1,
-    max_length: int = 512,
+    max_length: int = 256,
     warmup_ratio: float = 0.06,
     weight_decay: float = 0.01,
     early_stopping_patience: int = 3,
@@ -173,8 +173,8 @@ def main():
     parser.add_argument(
         "--max-length",
         type=int,
-        default=512,
-        help="Token sequence length (default: 512, use 256 to halve memory/time)",
+        default=256,
+        help="Token sequence length (default: 256)",
     )
     parser.add_argument("--lr",                      type=float, default=2e-5)
     parser.add_argument("--warmup-ratio",            type=float, default=0.06)
