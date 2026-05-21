@@ -2,6 +2,7 @@
 Loads the consolidated PII dataset, applies:
   - finer_139 source cap (150k records)
   - rare entity type dropping (< 500 B- mentions -> collapsed to O)
+  - nvidia_nemotron cleanup: keep PII-bearing rows only, then target 10% share
   - stratified 80/10/10 split by source
   - 1% eval subsets: data/val_1p.jsonl and data/test_1p.jsonl
 
@@ -24,10 +25,13 @@ import random
 from collections import Counter, defaultdict
 from pathlib import Path
 
-CONSOLIDATED_FILE = Path("./notebooks/pii_datasets/consolidated/consolidated.jsonl")
+CONSOLIDATED_FILE = Path("./pii_datasets/consolidated/consolidated.jsonl")
 OUTPUT_DIR = Path("./data")
 FINER_CAP = 150_000
 RARE_THRESHOLD = 500
+NVIDIA_SOURCE = "nvidia_nemotron"
+NVIDIA_KEEP_PII_ONLY = True
+NVIDIA_TARGET_SHARE = 0.10
 TRAIN_RATIO = 0.8
 VAL_RATIO = 0.1
 SUBSET_FRACTION = 0.01   # 1% of val/test for fast intra-training eval
@@ -107,6 +111,58 @@ def drop_rare_entities(records: list, threshold: int) -> tuple:
         print("\nNo rare entity types to drop.")
 
     return records, sorted(kept_types), sorted(dropped_types)
+
+
+# ---------------------------------------------------------------------------
+# Nemotron handling
+# ---------------------------------------------------------------------------
+
+def has_entity(rec: dict) -> bool:
+    return any(lbl != "O" for lbl in rec["labels"])
+
+
+def prepare_nvidia_share(records: list, target_share: float, seed: int) -> list:
+    """
+    Keep all PII-bearing Nemotron rows and sample the non-Nemotron pool so
+    Nemotron contributes the configured share of every source-stratified split.
+
+    Because stratified_split applies the same 80/10/10 ratios per source, a
+    10% source share here remains ~10% in train, val, and test.
+    """
+    if not 0 < target_share < 1:
+        return records
+
+    nvidia = [r for r in records if r["source"] == NVIDIA_SOURCE]
+    rest = [r for r in records if r["source"] != NVIDIA_SOURCE]
+
+    if NVIDIA_KEEP_PII_ONLY:
+        before = len(nvidia)
+        nvidia = [r for r in nvidia if has_entity(r)]
+        print(
+            f"{NVIDIA_SOURCE}: kept {len(nvidia):,} PII-bearing records "
+            f"(dropped {before - len(nvidia):,} all-O records after rare-label cleanup)"
+        )
+
+    if not nvidia:
+        print(f"{NVIDIA_SOURCE}: no PII-bearing records found; skipping 10% share balancing.")
+        return rest
+
+    target_rest_count = int(round(len(nvidia) * (1.0 - target_share) / target_share))
+    rng = random.Random(seed)
+
+    if len(rest) > target_rest_count:
+        rest = rng.sample(rest, target_rest_count)
+        action = "sampled"
+    else:
+        action = "kept"
+
+    combined = rest + nvidia
+    actual_share = len(nvidia) / len(combined)
+    print(
+        f"{NVIDIA_SOURCE}: {action} non-Nemotron records to {len(rest):,}; "
+        f"Nemotron share = {len(nvidia):,}/{len(combined):,} ({actual_share:.2%})"
+    )
+    return combined
 
 
 # ---------------------------------------------------------------------------
@@ -221,22 +277,27 @@ def prepare():
     # 3. Drop rare entity types
     records, kept_types, dropped_types = drop_rare_entities(records, RARE_THRESHOLD)
 
-    # 4. Build label mapping
+    # 4. Keep Nemotron positives and balance its source share.
+    print(f"\nBalancing {NVIDIA_SOURCE} to {NVIDIA_TARGET_SHARE:.0%} source share ...")
+    records = prepare_nvidia_share(records, NVIDIA_TARGET_SHARE, RANDOM_SEED)
+    print(f"Total after {NVIDIA_SOURCE} balancing: {len(records):,}")
+
+    # 5. Build label mapping
     labels, label2id, id2label = build_label_mapping(kept_types)
     print(f"\nFinal label set ({len(labels)} labels including O):")
     for lbl in labels:
         print(f"  {lbl}")
 
-    # 5. Stratified split
+    # 6. Stratified split
     train, val, test = stratified_split(records, TRAIN_RATIO, VAL_RATIO, RANDOM_SEED)
 
-    # 6. Save full splits
+    # 7. Save full splits
     print("\nSaving splits ...")
     save_split(train, OUTPUT_DIR / "train.jsonl")
     save_split(val,   OUTPUT_DIR / "val.jsonl")
     save_split(test,  OUTPUT_DIR / "test.jsonl")
 
-    # 7. Save 1% eval subsets (stratified by source)
+    # 8. Save 1% eval subsets (stratified by source)
     print(f"\nCreating {SUBSET_FRACTION:.0%} eval subsets ...")
     val_1p  = make_stratified_subset(val,  SUBSET_FRACTION, RANDOM_SEED)
     test_1p = make_stratified_subset(test, SUBSET_FRACTION, RANDOM_SEED)
@@ -251,7 +312,7 @@ def prepare():
         f"({len(test_1p)/len(test)*100:.1f}% of test)"
     )
 
-    # 8. Save label mapping
+    # 9. Save label mapping
     mapping = {
         "labels": labels,
         "label2id": label2id,

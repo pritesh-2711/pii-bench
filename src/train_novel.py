@@ -139,6 +139,13 @@ COARSE2ID = {lbl: i for i, lbl in enumerate(COARSE_NAMES)}
 ID2COARSE = {i: lbl for i, lbl in enumerate(COARSE_NAMES)}
 
 
+def build_class_weights(label2id: dict, o_label_weight: float, entity_label_weight: float) -> torch.Tensor:
+    weights = torch.full((len(label2id),), float(entity_label_weight), dtype=torch.float32)
+    if "O" in label2id:
+        weights[label2id["O"]] = float(o_label_weight)
+    return weights
+
+
 def fine_to_coarse(fine_label: str) -> str:
     if fine_label == "O":
         return "O"
@@ -282,7 +289,15 @@ class HierarchicalPIIModel(PreTrainedModel):
     Loss: L = L_fine + coarse_weight * L_coarse
     """
 
-    def __init__(self, config, num_fine_labels: int, num_coarse_labels: int, coarse_weight: float = 0.3):
+    def __init__(
+        self,
+        config,
+        num_fine_labels: int,
+        num_coarse_labels: int,
+        coarse_weight: float = 0.3,
+        fine_class_weights: torch.Tensor | None = None,
+        coarse_class_weights: torch.Tensor | None = None,
+    ):
         super().__init__(config)
         from transformers import DebertaV2Model
         self.deberta      = DebertaV2Model(config)
@@ -293,6 +308,8 @@ class HierarchicalPIIModel(PreTrainedModel):
         self.num_fine_labels   = num_fine_labels
         self.num_coarse_labels = num_coarse_labels
         self.coarse_weight     = coarse_weight
+        self.register_buffer("fine_class_weights", fine_class_weights, persistent=False)
+        self.register_buffer("coarse_class_weights", coarse_class_weights, persistent=False)
         self.post_init()
 
     def forward(
@@ -327,13 +344,20 @@ class HierarchicalPIIModel(PreTrainedModel):
 
         loss = None
         if labels is not None:
-            loss_fct = nn.CrossEntropyLoss()
-            fine_loss = loss_fct(
+            fine_loss_fct = nn.CrossEntropyLoss(
+                weight=self.fine_class_weights,
+                ignore_index=-100,
+            )
+            fine_loss = fine_loss_fct(
                 fine_logits.view(-1, self.num_fine_labels),
                 labels.view(-1),
             )
             if coarse_labels is not None:
-                coarse_loss = loss_fct(
+                coarse_loss_fct = nn.CrossEntropyLoss(
+                    weight=self.coarse_class_weights,
+                    ignore_index=-100,
+                )
+                coarse_loss = coarse_loss_fct(
                     coarse_logits.view(-1, self.num_coarse_labels),
                     coarse_labels.view(-1),
                 )
@@ -380,6 +404,30 @@ class PIIDataCollator(DataCollatorForTokenClassification):
                 f["coarse_labels"] = cl
 
         return batch
+
+
+class WeightedTokenClassificationTrainer(Trainer):
+    """
+    Weighted loss for the flat token-classification baseline inside this file.
+    HierarchicalPIIModel applies its weighted fine/coarse losses internally.
+    """
+
+    def __init__(self, *args, class_weights: torch.Tensor | None = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.class_weights = class_weights
+
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        labels = inputs.get("labels")
+        outputs = model(**inputs)
+        if labels is None:
+            loss = outputs["loss"] if isinstance(outputs, dict) else outputs.loss
+            return (loss, outputs) if return_outputs else loss
+
+        logits = outputs["logits"] if isinstance(outputs, dict) else outputs.logits
+        weight = self.class_weights.to(logits.device) if self.class_weights is not None else None
+        loss_fct = nn.CrossEntropyLoss(weight=weight, ignore_index=-100)
+        loss = loss_fct(logits.view(-1, logits.size(-1)), labels.view(-1))
+        return (loss, outputs) if return_outputs else loss
 
 
 # ---------------------------------------------------------------------------
@@ -449,6 +497,7 @@ def run_curriculum_phase(
     output_dir: Path,
     bf16: bool,
     gradient_checkpointing: bool,
+    fine_class_weights: torch.Tensor,
     model=None,
 ):
     print(f"\n{'='*60}")
@@ -504,13 +553,19 @@ def run_curriculum_phase(
 
     collator = PIIDataCollator(tokenizer=tokenizer, padding=True, label_pad_token_id=-100)
 
-    trainer = Trainer(
+    trainer_cls = Trainer if hierarchical else WeightedTokenClassificationTrainer
+    trainer_kwargs = {}
+    if not hierarchical:
+        trainer_kwargs["class_weights"] = fine_class_weights
+
+    trainer = trainer_cls(
         model=model,
         args=args,
         train_dataset=train_ds,
         eval_dataset=val_dataset,
         data_collator=collator,
         compute_metrics=make_compute_metrics(id2label),
+        **trainer_kwargs,
     )
 
     trainer.train()
@@ -539,6 +594,10 @@ def main(args):
     print(f"Source conditioning: {args.source_cond}")
     print(f"Curriculum learning: {args.curriculum}")
     print(f"Hierarchical head:   {args.hierarchical}")
+    print(
+        f"Class weights: O={args.o_label_weight:.3f}, "
+        f"entity={args.entity_label_weight:.3f}"
+    )
 
     # Load tokenizer
     model_id = args.model_id
@@ -551,6 +610,16 @@ def main(args):
 
     # Build model
     coarse_weight = args.coarse_loss_weight
+    fine_class_weights = build_class_weights(
+        label2id,
+        o_label_weight=args.o_label_weight,
+        entity_label_weight=args.entity_label_weight,
+    )
+    coarse_class_weights = build_class_weights(
+        COARSE2ID,
+        o_label_weight=args.o_label_weight,
+        entity_label_weight=args.entity_label_weight,
+    )
     if args.hierarchical:
         config = AutoConfig.from_pretrained(
             model_id,
@@ -563,6 +632,8 @@ def main(args):
             num_fine_labels=num_labels,
             num_coarse_labels=len(COARSE_NAMES),
             coarse_weight=coarse_weight,
+            fine_class_weights=fine_class_weights,
+            coarse_class_weights=coarse_class_weights,
         )
         # Load DeBERTa weights into .deberta sub-module
         from transformers import DebertaV2Model
@@ -624,6 +695,7 @@ def main(args):
                 output_dir=output_dir,
                 bf16=args.bf16,
                 gradient_checkpointing=args.gradient_checkpointing,
+                fine_class_weights=fine_class_weights,
                 model=model,
             )
     else:
@@ -671,13 +743,19 @@ def main(args):
 
         collator = PIIDataCollator(tokenizer=tokenizer, padding=True, label_pad_token_id=-100)
 
-        trainer = Trainer(
+        trainer_cls = Trainer if args.hierarchical else WeightedTokenClassificationTrainer
+        trainer_kwargs = {}
+        if not args.hierarchical:
+            trainer_kwargs["class_weights"] = fine_class_weights
+
+        trainer = trainer_cls(
             model=model,
             args=train_args,
             train_dataset=train_ds,
             eval_dataset=val_list,
             data_collator=collator,
             compute_metrics=make_compute_metrics(id2label),
+            **trainer_kwargs,
         )
         trainer.train()
         model = trainer.model
@@ -748,6 +826,8 @@ if __name__ == "__main__":
     parser.add_argument("--max-length",           type=int,   default=256)
     parser.add_argument("--epochs",               type=int,   default=3,   help="Epochs for flat (non-curriculum) training")
     parser.add_argument("--lr",                   type=float, default=2e-5, help="Learning rate for flat training")
+    parser.add_argument("--o-label-weight",       type=float, default=0.1, help="Cross-entropy weight for label O")
+    parser.add_argument("--entity-label-weight",  type=float, default=1.0, help="Cross-entropy weight for non-O labels")
     parser.add_argument("--bf16",                 action="store_true")
     parser.add_argument("--gradient-checkpointing", action="store_true")
 

@@ -25,6 +25,7 @@ Fixes vs original:
   - span_to_bio: falls back to character search when exact char offset misses.
 """
 
+import ast
 import json
 import argparse
 from pathlib import Path
@@ -300,23 +301,20 @@ def parse_span_field(raw) -> list:
                 if len(item) >= 3:
                     result.append({"start": item[0], "end": item[1], "type": item[2]})
             elif isinstance(item, str):
-                try:
-                    parsed = json.loads(item)
-                    if isinstance(parsed, dict):
-                        result.append(parsed)
-                    elif isinstance(parsed, list):
-                        result.extend(parsed)
-                except Exception:
-                    pass
+                parsed = parse_span_field(item)
+                result.extend(parsed)
         return result
     if isinstance(raw, str):
-        try:
-            parsed = json.loads(raw)
+        for parser in (json.loads, ast.literal_eval):
+            try:
+                parsed = parser(raw)
+            except Exception:
+                continue
             if isinstance(parsed, list):
                 return parse_span_field(parsed)
-            return [parsed]
-        except Exception:
-            return []
+            if isinstance(parsed, dict):
+                return [parsed]
+        return []
     return []
 
 
@@ -443,7 +441,7 @@ def read_nvidia_jsonl(filepath: Path) -> list:
     'spans' yields no entities, using a simple regex over XML-like tags.
     """
     import re
-    tag_re = re.compile(r'<(\w+)>(.*?)</\1>', re.DOTALL)
+    bracket_tag_re = re.compile(r'\[(.*?)\]([A-Za-z_][A-Za-z0-9_]*)', re.DOTALL)
 
     records = []
     with open(filepath) as f:
@@ -461,27 +459,26 @@ def read_nvidia_jsonl(filepath: Path) -> list:
             tokens, labels = span_to_bio(text, spans)
             labels = [normalise_label(l) for l in labels]
 
-            # Fallback: if no entities found and text_tagged is available, parse tags
+            # Fallback: if no entities found and text_tagged is available, parse
+            # Nemotron's "[value]label" inline format.
             has_entities = any(l != "O" for l in labels)
             if not has_entities:
                 text_tagged = row.get("text_tagged", "")
                 if text_tagged:
                     fallback_spans = []
-                    # Strip tags to get clean text, track offsets
                     clean = ""
-                    cursor = 0
                     remaining = text_tagged
                     while remaining:
-                        m = re.search(r'<(\w+)>(.*?)</\1>', remaining, re.DOTALL)
+                        m = bracket_tag_re.search(remaining)
                         if not m:
                             clean += remaining
                             break
                         clean += remaining[:m.start()]
                         entity_start = len(clean)
-                        entity_text = m.group(2)
+                        entity_text = m.group(1)
                         clean += entity_text
                         entity_end = len(clean)
-                        entity_type = m.group(1)
+                        entity_type = m.group(2)
                         fallback_spans.append({
                             "start": entity_start,
                             "end": entity_end,
