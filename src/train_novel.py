@@ -357,6 +357,8 @@ class HierarchicalPIIModel(PreTrainedModel):
     Loss: L = L_fine + coarse_weight * L_coarse
     """
 
+    supports_gradient_checkpointing = True
+
     def __init__(
         self,
         config,
