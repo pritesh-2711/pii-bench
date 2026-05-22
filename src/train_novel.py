@@ -380,6 +380,12 @@ class HierarchicalPIIModel(PreTrainedModel):
         self.register_buffer("coarse_class_weights", coarse_class_weights, persistent=False)
         self.post_init()
 
+    def get_input_embeddings(self):
+        return self.deberta.get_input_embeddings()
+
+    def set_input_embeddings(self, value):
+        self.deberta.set_input_embeddings(value)
+
     def forward(
         self,
         input_ids=None,
