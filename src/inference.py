@@ -20,7 +20,14 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
-from transformers import AutoTokenizer, AutoModelForTokenClassification
+from transformers import AutoConfig, AutoTokenizer, AutoModelForTokenClassification
+
+try:
+    from train_novel import COARSE_NAMES, DEFAULT_SOURCE_TOKEN, HierarchicalPIIModel
+except Exception:  # pragma: no cover - only used when loading novelty models
+    COARSE_NAMES = []
+    DEFAULT_SOURCE_TOKEN = "[SRC=general]"
+    HierarchicalPIIModel = None
 
 from exceptions import (
     EmptyInputError,
@@ -98,9 +105,16 @@ class PIIDetector:
 
         try:
             self.tokenizer = AutoTokenizer.from_pretrained(str(self.model_path))
-            self.model     = AutoModelForTokenClassification.from_pretrained(
-                str(self.model_path)
+            self.config = AutoConfig.from_pretrained(str(self.model_path))
+            self.source_conditioned = bool(
+                getattr(self.config, "pii_source_conditioned", False)
             )
+            self.default_source_token = getattr(
+                self.config,
+                "pii_default_source_token",
+                DEFAULT_SOURCE_TOKEN,
+            )
+            self.model = self._load_model()
         except Exception as exc:
             raise ModelLoadError(str(self.model_path), str(exc)) from exc
 
@@ -226,18 +240,65 @@ class PIIDetector:
         if len(text) > MAX_CHARS:
             raise InputTooLargeError(len(text), MAX_CHARS)
 
+    def _load_model(self):
+        architecture = getattr(self.config, "pii_model_architecture", "flat")
+        if architecture == "hierarchical":
+            if HierarchicalPIIModel is None:
+                raise ModelLoadError(
+                    str(self.model_path),
+                    "Hierarchical model class is unavailable.",
+                )
+            return HierarchicalPIIModel.from_pretrained(
+                str(self.model_path),
+                config=self.config,
+                num_fine_labels=len(self.label2id),
+                num_coarse_labels=len(COARSE_NAMES),
+                coarse_weight=float(getattr(self.config, "pii_coarse_loss_weight", 0.3)),
+            )
+
+        return AutoModelForTokenClassification.from_pretrained(str(self.model_path))
+
+    def _prepare_model_text(self, text: str) -> Tuple[str, int]:
+        if not getattr(self, "source_conditioned", False):
+            return text, 0
+        prefix = f"{self.default_source_token} "
+        return prefix + text, len(prefix)
+
+    def _shift_offsets(
+        self,
+        offset_mapping: List[Tuple[int, int]],
+        offset_shift: int,
+    ) -> List[Tuple[int, int]]:
+        if offset_shift == 0:
+            return offset_mapping
+
+        shifted = []
+        for char_start, char_end in offset_mapping:
+            if char_start == 0 and char_end == 0:
+                shifted.append((0, 0))
+            elif char_end <= offset_shift:
+                shifted.append((0, 0))
+            else:
+                shifted.append((max(0, char_start - offset_shift),
+                                max(0, char_end - offset_shift)))
+        return shifted
+
     @torch.inference_mode()
     def _run_inference(self, text: str) -> List[Dict]:
         try:
+            model_text, offset_shift = self._prepare_model_text(text)
             encoding = self.tokenizer(
-                text,
+                model_text,
                 return_tensors="pt",
                 truncation=True,
                 max_length=512,
                 padding=False,
                 return_offsets_mapping=True,
             )
-            offset_mapping = encoding.pop("offset_mapping")[0].tolist()
+            offset_mapping = self._shift_offsets(
+                encoding.pop("offset_mapping")[0].tolist(),
+                offset_shift,
+            )
             encoding = {k: v.to(self.device) for k, v in encoding.items()}
 
             logits      = self.model(**encoding).logits
@@ -424,14 +485,18 @@ class FastPIIDetector(PIIDetector):
     def _run_batch_inference(self, texts: List[str]) -> List[List[Dict]]:
         try:
             encoding = self.tokenizer(
-                texts,
+                [self._prepare_model_text(text)[0] for text in texts],
                 return_tensors="pt",
                 truncation=True,
                 max_length=512,
                 padding=True,
                 return_offsets_mapping=True,
             )
-            offset_mappings = encoding.pop("offset_mapping").tolist()
+            raw_offsets = encoding.pop("offset_mapping").tolist()
+            offset_mappings = [
+                self._shift_offsets(offsets, self._prepare_model_text(text)[1])
+                for text, offsets in zip(texts, raw_offsets)
+            ]
             encoding = {k: v.to(self.device) for k, v in encoding.items()}
 
             logits = self.model(**encoding).logits

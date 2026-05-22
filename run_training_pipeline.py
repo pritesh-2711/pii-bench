@@ -36,10 +36,13 @@ import sys
 import argparse
 from pathlib import Path
 
+import torch
+
 sys.path.append(str(Path(__file__).parent / "src"))
 
 from download_model import main as download_model
 from train import PIITrainer, PRETOKENIZED_DIR
+from train_novel import main as run_novel_training
 
 
 def run_pipeline(
@@ -69,6 +72,14 @@ def run_pipeline(
     pretokenize_num_proc: int = 4,
     train_sample_fraction: float = 0.0,
     skip_final_eval: bool = False,
+    novel: bool = False,
+    source_cond: bool = False,
+    curriculum: bool = False,
+    hierarchical: bool = False,
+    coarse_loss_weight: float = 0.3,
+    novel_output_dir: str = "./models/full_novel",
+    o_label_weight: float = 0.1,
+    entity_label_weight: float = 1.0,
 ):
     print("=" * 80)
     print("PII DETECTION — TRAINING PIPELINE")
@@ -91,6 +102,43 @@ def run_pipeline(
     # ------------------------------------------------------------------
     print("\n[STEP 2/2] Fine-tuning on PII NER data")
     print("-" * 80)
+
+    if novel:
+        if pretokenize_only or use_pretokenized:
+            print("Note: novelty training streams JSONL directly; pretokenized eval flags are ignored.")
+        if train_sample_fraction > 0.0:
+            print("Note: novelty training uses data/train.jsonl directly; train-sample-fraction is ignored.")
+
+        novel_args = argparse.Namespace(
+            splits_dir="./data",
+            output_dir=novel_output_dir,
+            model_id="microsoft/deberta-v3-base",
+            source_cond=source_cond,
+            curriculum=curriculum,
+            hierarchical=hierarchical,
+            coarse_loss_weight=coarse_loss_weight,
+            batch_size=batch_size,
+            eval_batch_size=eval_batch_size,
+            grad_accum=grad_accum,
+            max_length=max_length,
+            epochs=num_epochs,
+            max_steps=max_steps,
+            lr=learning_rate,
+            eval_steps=eval_steps,
+            save_steps=save_steps,
+            logging_steps=logging_steps,
+            eval_accumulation_steps=eval_accumulation_steps,
+            resume_from_checkpoint=resume_from_checkpoint,
+            skip_final_eval=skip_final_eval,
+            o_label_weight=o_label_weight,
+            entity_label_weight=entity_label_weight,
+            bf16=torch.cuda.is_available() and torch.cuda.is_bf16_supported(),
+            gradient_checkpointing=use_gradient_checkpointing,
+        )
+        run_novel_training(novel_args)
+        print("\nNovel training complete.")
+        print(f"  Final model: {Path(novel_output_dir) / 'final_model'}")
+        return {}
 
     trainer = PIITrainer(
         batch_size=batch_size,
@@ -116,6 +164,8 @@ def run_pipeline(
         pretokenized_dir=pretokenized_dir,
         train_sample_fraction=train_sample_fraction,
         skip_final_eval=skip_final_eval,
+        o_label_weight=o_label_weight,
+        entity_label_weight=entity_label_weight,
     )
 
     if pretokenize_only:
@@ -267,6 +317,18 @@ def main():
             "and plan to run inference locally."
         ),
     )
+    parser.add_argument(
+        "--novel",
+        action="store_true",
+        help="Run the integrated novelty trainer instead of the flat baseline trainer.",
+    )
+    parser.add_argument("--source-cond", action="store_true", help="Novel mode: prepend source tokens.")
+    parser.add_argument("--curriculum", action="store_true", help="Novel mode: train in source-family phases.")
+    parser.add_argument("--hierarchical", action="store_true", help="Novel mode: use coarse-to-fine hierarchical head.")
+    parser.add_argument("--coarse-loss-weight", type=float, default=0.3, help="Novel mode: coarse loss weight.")
+    parser.add_argument("--novel-output-dir", type=str, default="./models/full_novel", help="Novel mode output directory.")
+    parser.add_argument("--o-label-weight", type=float, default=0.1, help="Cross-entropy weight for label O.")
+    parser.add_argument("--entity-label-weight", type=float, default=1.0, help="Cross-entropy weight for non-O labels.")
 
     args = parser.parse_args()
 
@@ -297,6 +359,14 @@ def main():
         pretokenize_num_proc=args.pretokenize_num_proc,
         train_sample_fraction=args.train_sample_fraction,
         skip_final_eval=args.skip_final_eval,
+        novel=args.novel,
+        source_cond=args.source_cond,
+        curriculum=args.curriculum,
+        hierarchical=args.hierarchical,
+        coarse_loss_weight=args.coarse_loss_weight,
+        novel_output_dir=args.novel_output_dir,
+        o_label_weight=args.o_label_weight,
+        entity_label_weight=args.entity_label_weight,
     )
 
 

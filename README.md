@@ -123,7 +123,7 @@ Default hyperparameters (`run_training_pipeline.py`):
 | Gradient accumulation | 4 (effective batch = 64) |
 | Learning rate | 2e-5 |
 | Epochs | 10 |
-| Max sequence length | 512 |
+| Max sequence length | 256 |
 | Warmup ratio | 0.06 |
 | Weight decay | 0.01 |
 | Early stopping patience | 3 |
@@ -145,6 +145,57 @@ Resume from a checkpoint:
 ```bash
 python run_training_pipeline.py --skip-download --resume-from-checkpoint
 ```
+
+## Novel Training
+
+The integrated novelty trainer keeps the corrected prepared splits and weighted
+loss, then optionally adds source conditioning, curriculum learning, and a
+coarse-to-fine hierarchical head.
+
+Quick sanity run:
+
+```bash
+python run_training_pipeline.py \
+    --skip-download \
+    --novel \
+    --source-cond \
+    --hierarchical \
+    --max-length 256 \
+    --batch-size 6 \
+    --eval-batch-size 8 \
+    --grad-accum 10 \
+    --max-steps 500 \
+    --eval-steps 100 \
+    --save-steps 100 \
+    --logging-steps 25 \
+    --skip-final-eval
+```
+
+Longer checkpointed run:
+
+```bash
+python run_training_pipeline.py \
+    --skip-download \
+    --novel \
+    --source-cond \
+    --hierarchical \
+    --novel-output-dir ./models/full_novel \
+    --max-length 256 \
+    --batch-size 6 \
+    --eval-batch-size 8 \
+    --grad-accum 10 \
+    --epochs 3 \
+    --eval-steps 1000 \
+    --save-steps 1000 \
+    --logging-steps 50 \
+    --eval-accumulation-steps 1 \
+    --gradient-checkpointing \
+    --skip-final-eval
+```
+
+The saved novelty model is written to `models/full_novel/final_model`.
+Hierarchical novelty models include metadata so `PIIDetector` can load the
+custom head.
 
 ## Inference
 

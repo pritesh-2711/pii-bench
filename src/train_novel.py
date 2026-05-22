@@ -5,18 +5,18 @@ PII-DeBERTa: novel fine-tuning with three contributions.
   2. Curriculum learning  -- three-phase training schedule (general NER ->
                              synthetic PII -> financial PII)
   3. Hierarchical head    -- coarse classification (10 groups) conditions
-                             fine-grained BIO prediction (97 labels)
+                             fine-grained BIO prediction
 
 All three features are controlled by flags and can be combined independently.
 
 Usage (standard baseline, no novelty):
     python src/train_novel.py \
-        --splits-dir   data/splits \
+        --splits-dir   data \
         --output-dir   models/flat_baseline
 
 Usage (source conditioning + curriculum + hierarchical head):
     python src/train_novel.py \
-        --splits-dir      data/splits \
+        --splits-dir      data \
         --output-dir      models/full_novel \
         --source-cond \
         --curriculum \
@@ -25,7 +25,7 @@ Usage (source conditioning + curriculum + hierarchical head):
 
 GCP V100 recommended settings:
     python src/train_novel.py \
-        --splits-dir          data/splits \
+        --splits-dir          data \
         --output-dir          models/full_novel \
         --source-cond \
         --curriculum \
@@ -43,7 +43,6 @@ import argparse
 import warnings
 import math
 from pathlib import Path
-from collections import defaultdict
 
 import numpy as np
 import torch
@@ -56,7 +55,6 @@ from transformers import (
     TrainingArguments,
     Trainer,
     DataCollatorForTokenClassification,
-    EarlyStoppingCallback,
 )
 from transformers.modeling_outputs import TokenClassifierOutput
 from seqeval.metrics import f1_score, precision_score, recall_score
@@ -71,6 +69,10 @@ warnings.filterwarnings("ignore")
 COARSE_GROUPS = {
     "PERSON":              "PERSON_GROUP",
     "PERSON_NAME":         "PERSON_GROUP",
+    "FIRST_NAME":          "PERSON_GROUP",
+    "LAST_NAME":           "PERSON_GROUP",
+    "NAME":                "PERSON_GROUP",
+    "AGE":                 "PERSON_GROUP",
     "PREFIX":              "PERSON_GROUP",
     "SUFFIX":              "PERSON_GROUP",
     "GENDER":              "PERSON_GROUP",
@@ -80,14 +82,19 @@ COARSE_GROUPS = {
     "FAX":                 "CONTACT",
     "CREDIT_CARD":         "FINANCIAL_ID",
     "CREDIT_CARD_NUMBER":  "FINANCIAL_ID",
+    "CREDIT_DEBIT_CARD":   "FINANCIAL_ID",
+    "CVV":                 "FINANCIAL_ID",
     "ACCOUNT_NUMBER":      "FINANCIAL_ID",
     "IBAN":                "FINANCIAL_ID",
     "BBAN":                "FINANCIAL_ID",
     "BIC":                 "FINANCIAL_ID",
+    "BANK_ROUTING_NUMBER": "FINANCIAL_ID",
     "ROUTING_NUMBER":      "FINANCIAL_ID",
+    "SWIFT_BIC":           "FINANCIAL_ID",
     "SWIFT_BIC_CODE":      "FINANCIAL_ID",
     "DATE":                "TEMPORAL",
     "TIME":                "TEMPORAL",
+    "DATE_TIME":           "TEMPORAL",
     "DOB":                 "TEMPORAL",
     "DATE_OF_BIRTH":       "TEMPORAL",
     "PASSWORD":            "CREDENTIAL",
@@ -96,28 +103,61 @@ COARSE_GROUPS = {
     "SSN":                 "CREDENTIAL",
     "TAX_ID":              "CREDENTIAL",
     "NATIONAL_ID":         "CREDENTIAL",
+    "API_KEY":             "CREDENTIAL",
+    "BIOMETRIC_IDENTIFIER": "CREDENTIAL",
+    "CERTIFICATE_LICENSE_NUMBER": "CREDENTIAL",
+    "CUSTOMER_ID":         "CREDENTIAL",
+    "DRIVER_LICENSE_NUMBER": "CREDENTIAL",
+    "EMPLOYEE_ID":         "CREDENTIAL",
+    "HEALTH_PLAN_BENEFICIARY_NUMBER": "CREDENTIAL",
+    "MEDICAL_RECORD_NUMBER": "CREDENTIAL",
+    "PASSPORT_NUMBER":     "CREDENTIAL",
+    "UNIQUE_ID":           "CREDENTIAL",
     "IP_ADDRESS":          "NETWORK",
+    "IPV4":                "NETWORK",
+    "IPV6":                "NETWORK",
     "MAC_ADDRESS":         "NETWORK",
     "URL":                 "NETWORK",
     "USERNAME":            "NETWORK",
     "USER_NAME":           "NETWORK",
+    "DEVICE_IDENTIFIER":   "NETWORK",
+    "HTTP_COOKIE":         "NETWORK",
     "ORGANIZATION":        "ORG_ROLE",
+    "ORG":                 "ORG_ROLE",
     "COMPANY":             "ORG_ROLE",
+    "COMPANY_NAME":        "ORG_ROLE",
     "JOB_TITLE":           "ORG_ROLE",
     "JOB":                 "ORG_ROLE",
+    "OCCUPATION":          "ORG_ROLE",
     "LOCATION":            "LOCATION",
+    "LOC":                 "LOCATION",
     "ADDRESS":             "LOCATION",
     "STREET_ADDRESS":      "LOCATION",
     "CITY":                "LOCATION",
     "STATE":               "LOCATION",
     "COUNTRY":             "LOCATION",
+    "COUNTY":              "LOCATION",
+    "COORDINATE":          "LOCATION",
+    "LOCAL_LATLNG":        "LOCATION",
+    "POSTCODE":            "LOCATION",
     "ZIP_CODE":            "LOCATION",
     "VEHICLE":             "MISC",
+    "VEHICLE_IDENTIFIER":  "MISC",
+    "LICENSE_PLATE":       "MISC",
     "AMOUNT":              "MISC",
     "CURRENCY":            "MISC",
     "CRYPTO_ADDRESS":      "MISC",
     "CREDIT_CARD_SECURITY_CODE": "MISC",
     "BLOOD_TYPE":          "MISC",
+    "EDUCATION_LEVEL":     "MISC",
+    "EMPLOYMENT_STATUS":   "MISC",
+    "FAX_NUMBER":          "CONTACT",
+    "LANGUAGE":            "MISC",
+    "POLITICAL_VIEW":      "MISC",
+    "RACE_ETHNICITY":      "MISC",
+    "RELIGIOUS_BELIEF":    "MISC",
+    "SEXUALITY":           "MISC",
+    "MISC":                "MISC",
     "FINANCIAL_ENTITY":    "FINANCIAL_NER",
 }
 
@@ -155,6 +195,32 @@ def fine_to_coarse(fine_label: str) -> str:
     return f"{prefix}{group}"
 
 
+def count_jsonl_lines(path: Path) -> int:
+    count = 0
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            count += chunk.count(b"\n")
+    return count
+
+
+def resolve_model_source(model_id: str) -> str:
+    if model_id == HF_MODEL_ID and LOCAL_MODEL_PATH.exists():
+        return str(LOCAL_MODEL_PATH)
+    return model_id
+
+
+def validate_coarse_coverage(label_map: dict):
+    kept_types = label_map.get("kept_entity_types") or []
+    unmapped = sorted(t for t in kept_types if t not in COARSE_GROUPS)
+    if unmapped:
+        print(
+            "Coarse taxonomy fallback -> MISC for unmapped labels: "
+            + ", ".join(unmapped)
+        )
+    else:
+        print("Coarse taxonomy covers all kept entity types.")
+
+
 # ---------------------------------------------------------------------------
 # Source tokens
 # ---------------------------------------------------------------------------
@@ -172,6 +238,8 @@ SOURCE_TOKENS = {
     "gretel_finance":      "[SRC=gretel_finance]",
 }
 DEFAULT_SOURCE_TOKEN = "[SRC=general]"
+LOCAL_MODEL_PATH = Path("./models/deberta-v3-base")
+HF_MODEL_ID = "microsoft/deberta-v3-base"
 
 ALL_SOURCE_TOKENS = list(SOURCE_TOKENS.values()) + [DEFAULT_SOURCE_TOKEN]
 
@@ -490,6 +558,7 @@ def run_curriculum_phase(
     id2label: dict,
     max_length: int,
     batch_size: int,
+    eval_batch_size: int,
     grad_accum: int,
     source_cond: bool,
     hierarchical: bool,
@@ -498,6 +567,10 @@ def run_curriculum_phase(
     bf16: bool,
     gradient_checkpointing: bool,
     fine_class_weights: torch.Tensor,
+    eval_accumulation_steps: int,
+    eval_steps: int,
+    save_steps: int,
+    logging_steps: int,
     model=None,
 ):
     print(f"\n{'='*60}")
@@ -531,18 +604,21 @@ def run_curriculum_phase(
         output_dir=str(phase_output),
         max_steps=max_steps,
         per_device_train_batch_size=batch_size,
+        per_device_eval_batch_size=eval_batch_size,
         gradient_accumulation_steps=grad_accum,
         learning_rate=lr,
         warmup_steps=warmup_steps,
         lr_scheduler_type="linear",
-        logging_steps=max(1, steps_per_epoch // 20),
+        logging_steps=logging_steps if logging_steps > 0 else max(1, steps_per_epoch // 20),
         eval_strategy="steps",
-        eval_steps=max(1, steps_per_epoch // 4),
+        eval_steps=eval_steps if eval_steps > 0 else max(1, steps_per_epoch // 4),
         save_strategy="steps",
-        save_steps=max(1, steps_per_epoch // 4),
+        save_steps=save_steps if save_steps > 0 else max(1, steps_per_epoch // 4),
         load_best_model_at_end=True,
-        metric_for_best_model="f1",
+        metric_for_best_model="eval_f1",
         greater_is_better=True,
+        save_total_limit=3,
+        eval_accumulation_steps=eval_accumulation_steps,
         bf16=bf16,
         fp16=False,
         gradient_checkpointing=gradient_checkpointing,
@@ -589,6 +665,7 @@ def main(args):
     label2id = label_map["label2id"]
     id2label = {int(k): v for k, v in label_map["id2label"].items()}
     num_labels = label_map["num_labels"]
+    validate_coarse_coverage(label_map)
 
     print(f"Labels: {num_labels} total BIO labels")
     print(f"Source conditioning: {args.source_cond}")
@@ -598,9 +675,12 @@ def main(args):
         f"Class weights: O={args.o_label_weight:.3f}, "
         f"entity={args.entity_label_weight:.3f}"
     )
+    if args.curriculum and args.resume_from_checkpoint:
+        print("Note: --resume-from-checkpoint is only applied to flat novelty runs; curriculum phases are checkpointed separately.")
 
     # Load tokenizer
-    model_id = args.model_id
+    model_id = resolve_model_source(args.model_id)
+    print(f"Model source: {model_id}")
     tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True)
 
     # Add source tokens if needed
@@ -653,6 +733,13 @@ def main(args):
     if args.source_cond:
         model.resize_token_embeddings(len(tokenizer))
 
+    model.config.pii_model_architecture = "hierarchical" if args.hierarchical else "flat"
+    model.config.pii_source_conditioned = bool(args.source_cond)
+    model.config.pii_default_source_token = DEFAULT_SOURCE_TOKEN
+    model.config.pii_coarse_loss_weight = float(coarse_weight)
+    if args.hierarchical:
+        model.config.architectures = ["HierarchicalPIIModel"]
+
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Model parameters: {total_params:,}")
 
@@ -688,6 +775,7 @@ def main(args):
                 id2label=id2label,
                 max_length=args.max_length,
                 batch_size=args.batch_size,
+                eval_batch_size=args.eval_batch_size,
                 grad_accum=args.grad_accum,
                 source_cond=args.source_cond,
                 hierarchical=args.hierarchical,
@@ -696,6 +784,10 @@ def main(args):
                 bf16=args.bf16,
                 gradient_checkpointing=args.gradient_checkpointing,
                 fine_class_weights=fine_class_weights,
+                eval_accumulation_steps=args.eval_accumulation_steps,
+                eval_steps=args.eval_steps,
+                save_steps=args.save_steps,
+                logging_steps=args.logging_steps,
                 model=model,
             )
     else:
@@ -712,27 +804,30 @@ def main(args):
         )
 
         # Count training records
-        n_train = sum(1 for _ in open(train_path, "rb").read().split(b"\n") if _)
+        n_train = count_jsonl_lines(train_path)
         steps_per_epoch = math.ceil(n_train / (args.batch_size * args.grad_accum))
-        max_steps = steps_per_epoch * args.epochs
+        max_steps = args.max_steps if args.max_steps > 0 else steps_per_epoch * args.epochs
         warmup_steps = max(1, int(0.05 * max_steps))
 
         train_args = TrainingArguments(
             output_dir=str(output_dir / "checkpoints"),
             max_steps=max_steps,
             per_device_train_batch_size=args.batch_size,
+            per_device_eval_batch_size=args.eval_batch_size,
             gradient_accumulation_steps=args.grad_accum,
             learning_rate=args.lr,
             warmup_steps=warmup_steps,
             lr_scheduler_type="linear",
-            logging_steps=max(1, steps_per_epoch // 20),
+            logging_steps=args.logging_steps if args.logging_steps > 0 else max(1, steps_per_epoch // 20),
             eval_strategy="steps",
-            eval_steps=max(1, steps_per_epoch // 4),
+            eval_steps=args.eval_steps if args.eval_steps > 0 else max(1, steps_per_epoch // 4),
             save_strategy="steps",
-            save_steps=max(1, steps_per_epoch // 4),
+            save_steps=args.save_steps if args.save_steps > 0 else max(1, steps_per_epoch // 4),
             load_best_model_at_end=True,
-            metric_for_best_model="f1",
+            metric_for_best_model="eval_f1",
             greater_is_better=True,
+            save_total_limit=3,
+            eval_accumulation_steps=args.eval_accumulation_steps,
             bf16=args.bf16,
             fp16=False,
             gradient_checkpointing=args.gradient_checkpointing,
@@ -757,44 +852,63 @@ def main(args):
             compute_metrics=make_compute_metrics(id2label),
             **trainer_kwargs,
         )
-        trainer.train()
+        checkpoint = True if args.resume_from_checkpoint else None
+        trainer.train(resume_from_checkpoint=checkpoint)
         model = trainer.model
 
     # Final evaluation on full test set
-    print("\nRunning final evaluation on full test split ...")
-    test_ds = PIIDataset(
-        jsonl_path=splits_dir / "test.jsonl",
-        tokenizer=tokenizer,
-        label2id=label2id,
-        max_length=args.max_length,
-        source_cond=args.source_cond,
-        allowed_sources=None,
-        coarse2id=coarse2id,
-    )
-    # Final eval using a fresh Trainer (predict mode)
-    collator = PIIDataCollator(tokenizer=tokenizer, padding=True, label_pad_token_id=-100)
-    eval_args = TrainingArguments(
-        output_dir=str(output_dir / "final_eval"),
-        per_device_eval_batch_size=args.batch_size * 2,
-        bf16=args.bf16,
-        report_to="none",
-        label_names=["labels"],
-    )
-    eval_trainer = Trainer(
-        model=model,
-        args=eval_args,
-        data_collator=collator,
-        compute_metrics=make_compute_metrics(id2label),
-    )
-    test_results = eval_trainer.evaluate(eval_dataset=list(test_ds))
-    print("\nFinal test results:")
-    for k, v in test_results.items():
-        print(f"  {k}: {v:.4f}" if isinstance(v, float) else f"  {k}: {v}")
+    test_results = {}
+    if not args.skip_final_eval:
+        print("\nRunning final evaluation on full test split ...")
+        test_ds = PIIDataset(
+            jsonl_path=splits_dir / "test.jsonl",
+            tokenizer=tokenizer,
+            label2id=label2id,
+            max_length=args.max_length,
+            source_cond=args.source_cond,
+            allowed_sources=None,
+            coarse2id=coarse2id,
+        )
+        # Final eval using a fresh Trainer (predict mode)
+        collator = PIIDataCollator(tokenizer=tokenizer, padding=True, label_pad_token_id=-100)
+        eval_args = TrainingArguments(
+            output_dir=str(output_dir / "final_eval"),
+            per_device_eval_batch_size=args.eval_batch_size,
+            eval_accumulation_steps=args.eval_accumulation_steps,
+            bf16=args.bf16,
+            report_to="none",
+            label_names=["labels"],
+        )
+        eval_trainer = Trainer(
+            model=model,
+            args=eval_args,
+            data_collator=collator,
+            compute_metrics=make_compute_metrics(id2label),
+        )
+        test_results = eval_trainer.evaluate(eval_dataset=list(test_ds))
+        print("\nFinal test results:")
+        for k, v in test_results.items():
+            print(f"  {k}: {v:.4f}" if isinstance(v, float) else f"  {k}: {v}")
+    else:
+        print("\nSkipping final test evaluation (--skip-final-eval set).")
 
     # Save model and tokenizer
     model_save_path = output_dir / "final_model"
     model.save_pretrained(str(model_save_path))
     tokenizer.save_pretrained(str(model_save_path))
+    with open(model_save_path / "label_mapping.json", "w") as f:
+        json.dump(
+            {
+                "labels": label_map["labels"],
+                "label2id": label2id,
+                "id2label": {str(k): v for k, v in id2label.items()},
+                "kept_entity_types": label_map.get("kept_entity_types", []),
+                "dropped_entity_types": label_map.get("dropped_entity_types", []),
+                "num_labels": num_labels,
+            },
+            f,
+            indent=2,
+        )
     print(f"\nModel saved -> {model_save_path}")
 
     # Save test results
@@ -812,7 +926,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--splits-dir",   type=str, required=True, help="Directory with train/val/test jsonl splits")
     parser.add_argument("--output-dir",   type=str, required=True, help="Where to save checkpoints and final model")
-    parser.add_argument("--model-id",     type=str, default="microsoft/deberta-v3-base")
+    parser.add_argument("--model-id",     type=str, default=HF_MODEL_ID)
 
     # Novel features
     parser.add_argument("--source-cond",        action="store_true", help="Enable source conditioning tokens")
@@ -822,10 +936,18 @@ if __name__ == "__main__":
 
     # Training
     parser.add_argument("--batch-size",           type=int,   default=8)
+    parser.add_argument("--eval-batch-size",      type=int,   default=16)
     parser.add_argument("--grad-accum",           type=int,   default=8)
     parser.add_argument("--max-length",           type=int,   default=256)
     parser.add_argument("--epochs",               type=int,   default=3,   help="Epochs for flat (non-curriculum) training")
+    parser.add_argument("--max-steps",            type=int,   default=-1,  help="Hard step limit for flat training")
     parser.add_argument("--lr",                   type=float, default=2e-5, help="Learning rate for flat training")
+    parser.add_argument("--eval-steps",           type=int,   default=0, help="Eval interval; 0 means auto")
+    parser.add_argument("--save-steps",           type=int,   default=0, help="Checkpoint interval; 0 means auto")
+    parser.add_argument("--logging-steps",        type=int,   default=0, help="Logging interval; 0 means auto")
+    parser.add_argument("--eval-accumulation-steps", type=int, default=1)
+    parser.add_argument("--resume-from-checkpoint", action="store_true")
+    parser.add_argument("--skip-final-eval",      action="store_true")
     parser.add_argument("--o-label-weight",       type=float, default=0.1, help="Cross-entropy weight for label O")
     parser.add_argument("--entity-label-weight",  type=float, default=1.0, help="Cross-entropy weight for non-O labels")
     parser.add_argument("--bf16",                 action="store_true")
