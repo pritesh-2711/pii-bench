@@ -328,6 +328,26 @@ Observed improvement of the novelty approach over direct fine-tuning:
 These results provide positive validation evidence for the source-conditioned
 hierarchical approach. 
 
+## Controlled Held-Out Comparison
+
+The exported source-conditioned hierarchical model without curriculum was
+evaluated alongside the direct baseline and the eight original PIIBench
+comparison systems on the corrected held-out `data/test_5k.jsonl` subset.
+
+| Approach | Evaluation Split | F1 | Precision | Recall |
+|---|---|---:|---:|---:|
+| Direct DeBERTa fine-tuning baseline | `test_5k` | **0.6476** | **0.6300** | **0.6662** |
+| Source-conditioned hierarchical DeBERTa, no curriculum | `test_5k` | 0.5899 | 0.5565 | 0.6274 |
+| Best original comparator: SpanMarker BERT | `test_5k` | 0.1723 | 0.4266 | 0.1080 |
+
+The source-conditioned hierarchical model exceeds the strongest original
+comparator by `0.4176` absolute F1. However, it trails direct fine-tuning by
+`0.0577` F1 on held-out comparison data, despite outperforming direct
+fine-tuning on `val_1p`. The appropriate conclusion is that source
+conditioning plus hierarchy alone did not improve controlled held-out
+performance in this run. The curriculum-enabled run should be treated as a
+separate experiment, not as confirmation of the no-curriculum result.
+
 ## Saved Results And Verification
 
 The completed run produced:
@@ -407,19 +427,16 @@ configuration and applies the default source token for general inputs.
 - Curriculum learning is implemented in the codebase but was not evaluated in
   this completed run.
 
-## Required Follow-Up For Final Reporting
+## Reporting Status
 
-Before using final benchmark numbers in a paper:
+The ten-system controlled `test_5k` comparison has been completed. Report its
+scores as the held-out comparison and retain the `val_1p` scores only as
+model-selection evidence. The benchmark includes `222` BIO continuation spans
+that seqeval treats as new gold entities; this annotation note is documented
+in `docs/corrected-test-5k-benchmark.md`.
 
-1. Generate the fixed corrected held-out `data/test_5k.jsonl` benchmark with
-   the current preparation method and seed `42`.
-2. Run the eight systems from the PIIBench comparison and both trained
-   DeBERTa variants on that identical subset, following
-   `docs/corrected-test-5k-benchmark.md`.
-3. Report its precision, recall, and F1 as the controlled comparison; retain
-   the `val_1p` scores only as model-selection evidence.
-4. Optionally run the two trained models on the complete held-out
-   `test.jsonl` as an additional internal comparison.
+Remaining optional analyses are complete-test streaming evaluation and a
+BIO-normalized sensitivity analysis.
 
 ## Result Summary
 
@@ -434,4 +451,5 @@ Recall:    0.74165
 ```
 
 Compared with direct DeBERTa fine-tuning, this improves validation F1 by
-`1.67%` absolute while also improving precision and recall.
+`1.67%` absolute. On the completed held-out `test_5k` comparison, however,
+the same model scores `0.5899` F1 versus direct fine-tuning at `0.6476` F1.

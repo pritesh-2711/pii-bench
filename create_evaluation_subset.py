@@ -31,24 +31,47 @@ def sha256(path: Path) -> str:
 
 def summarize(records: list) -> dict:
     sources = Counter()
-    entities = Counter()
+    explicit_entities = Counter()
+    seqeval_entities = Counter()
+    continuation_starts = Counter()
     all_o = 0
     for record in records:
         sources[record["source"]] += 1
-        mentions = [
-            label[2:]
-            for label in record["labels"]
-            if label.startswith("B-")
-        ]
-        entities.update(mentions)
-        all_o += not mentions
+        has_seqeval_entity = False
+        previous_type = None
+        previous_prefix = "O"
+        for label in record["labels"]:
+            if label.startswith(("B-", "I-")):
+                prefix, entity_type = label.split("-", 1)
+                if prefix == "B":
+                    explicit_entities[entity_type] += 1
+                starts_span = (
+                    prefix == "B"
+                    or previous_prefix == "O"
+                    or previous_type != entity_type
+                )
+                if starts_span:
+                    seqeval_entities[entity_type] += 1
+                    has_seqeval_entity = True
+                    if prefix == "I":
+                        continuation_starts[entity_type] += 1
+                previous_prefix = prefix
+                previous_type = entity_type
+            else:
+                previous_prefix = "O"
+                previous_type = None
+        all_o += not has_seqeval_entity
     return {
         "records": len(records),
-        "entity_mentions": sum(entities.values()),
-        "observed_entity_types": len(entities),
+        "entity_mentions": sum(explicit_entities.values()),
+        "seqeval_entity_spans": sum(seqeval_entities.values()),
+        "bio_continuation_span_starts": sum(continuation_starts.values()),
+        "observed_entity_types": len(seqeval_entities),
         "all_o_records": all_o,
         "source_record_counts": dict(sorted(sources.items())),
-        "entity_mention_counts": dict(entities.most_common()),
+        "entity_mention_counts": dict(explicit_entities.most_common()),
+        "seqeval_entity_span_counts": dict(seqeval_entities.most_common()),
+        "bio_continuation_span_start_counts": dict(continuation_starts.most_common()),
     }
 
 

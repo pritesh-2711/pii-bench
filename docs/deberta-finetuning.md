@@ -258,6 +258,18 @@ Precision: ~0.5771
 Recall:    ~0.7298
 ```
 
+The completed controlled comparison on the corrected held-out
+`data/test_5k.jsonl` benchmark produced:
+
+| Evaluation Split | Records | F1 | Precision | Recall |
+|---|---:|---:|---:|---:|
+| `val_1p` model-selection subset | 994 | 0.6445 | 0.5771 | 0.7298 |
+| `test_5k` controlled comparison subset | 5,000 | **0.6476** | **0.6300** | **0.6662** |
+
+On `test_5k`, direct fine-tuned DeBERTa is the strongest of all ten evaluated
+systems. It exceeds the strongest original PIIBench comparator in this new
+benchmark, SpanMarker BERT (`F1 0.1723`), by `0.4753` absolute F1.
+
 The model was exported as:
 
 ```bash
@@ -293,17 +305,8 @@ print(result.to_dict())
 
 - Final full-test evaluation did not complete due to memory-heavy prediction
   accumulation in the default Trainer evaluation loop.
-- Reported metrics are from `val_1p`, not the full test set.
+- A final controlled test result is available on `test_5k`; a metric on the
+  complete 100,002-record `test.jsonl` split is not available.
 - The best checkpoint selection is based on the fast validation subset.
-- Final comparisons against external systems should use the corrected
-  held-out `test_5k` benchmark protocol in
-  `docs/corrected-test-5k-benchmark.md`.
-
-## Follow-Up Work
-
-1. Compare all paper baselines and both trained DeBERTa variants on the
-   corrected held-out `data/test_5k.jsonl` subset.
-2. Preserve `data/test_5k_summary.json` with result files so the comparison
-   table is tied to its exact test artifact.
-3. Optionally run chunked/streaming evaluation on the full `test.jsonl` for an
-   additional comparison limited to the two trained models.
+- The controlled benchmark contains BIO continuation irregularities documented
+  in `docs/corrected-test-5k-benchmark.md`.
