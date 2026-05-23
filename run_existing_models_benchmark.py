@@ -2,9 +2,10 @@
 Evaluates publicly available NER/PII models on the PIIBench test split.
 
 Each model was trained on one of the 10 PIIBench source datasets.
-We run them on our unified test set (test_1p.jsonl by default, or test.jsonl
-for the full evaluation) and map their predictions to PIIBench canonical labels
-so results are directly comparable to the DeBERTa fine-tuned numbers.
+We run them on the corrected held-out benchmark (`test_5k.jsonl` by default,
+or `test.jsonl` for the full evaluation) and map their predictions to PIIBench
+canonical labels so results are directly comparable to the DeBERTa fine-tuned
+numbers.
 
 Models evaluated:
   - dslim/bert-base-NER                              (CoNLL-2003)
@@ -19,24 +20,29 @@ Requirements:
     pip install span-marker   # for MultiNERD and FewNERD models only
 
 Usage:
-    # Fast eval on 1% stratified test subset (~1,400 records, ~minutes)
+    # Paper-comparison evaluation on the corrected 5,000-record benchmark subset
     python run_existing_models_benchmark.py \
-        --test-path   data/splits/test_1p.jsonl \
+        --test-path   data/test_5k.jsonl \
+        --output-path benchmark_results/corrected_test_5k/public_models.json
+
+    # Fast eval on the prepared 1% test subset
+    python run_existing_models_benchmark.py \
+        --test-path   data/test_1p.jsonl \
         --output-path benchmark_results/existing_models_results.json
 
-    # Full eval on complete test split (~140k records, ~hours)
+    # Full eval on complete prepared test split
     python run_existing_models_benchmark.py \
-        --test-path   data/splits/test.jsonl \
+        --test-path   data/test.jsonl \
         --output-path benchmark_results/existing_models_results_full.json
 
     # Run only specific models
     python run_existing_models_benchmark.py \
-        --test-path   data/splits/test_1p.jsonl \
+        --test-path   data/test_1p.jsonl \
         --models      conll wikiann piiranha
 
     # Use CPU (slower but no VRAM needed)
     python run_existing_models_benchmark.py \
-        --test-path   data/splits/test_1p.jsonl \
+        --test-path   data/test_1p.jsonl \
         --device      cpu
 """
 
@@ -44,6 +50,7 @@ import json
 import argparse
 import time
 import gc
+import hashlib
 from pathlib import Path
 
 import torch
@@ -63,8 +70,8 @@ from seqeval.metrics import (
 # Outputs: PER, ORG, LOC, MISC  (returned as entity_group by pipeline)
 CONLL_MAP = {
     "PER":  "PERSON",
-    "ORG":  "ORGANIZATION",
-    "LOC":  "LOCATION",
+    "ORG":  "ORG",
+    "LOC":  "LOC",
     "MISC": "O",   # too generic to map to any PIIBench PII type
 }
 
@@ -72,10 +79,10 @@ CONLL_MAP = {
 PIIRANHA_MAP = {
     "ACCOUNTNUM":       "ACCOUNT_NUMBER",
     "BUILDINGNUM":      "O",           # sub-component of address, no distinct PIIBench type
-    "CITY":             "O",           # city alone not a standalone PII type in PIIBench
-    "CREDITCARDNUMBER": "CREDIT_CARD",
-    "DATEOFBIRTH":      "DOB",
-    "DRIVERLICENSENUM": "NATIONAL_ID",
+    "CITY":             "CITY",
+    "CREDITCARDNUMBER": "CREDIT_CARD_NUMBER",
+    "DATEOFBIRTH":      "DATE_OF_BIRTH",
+    "DRIVERLICENSENUM": "DRIVER_LICENSE_NUMBER",
     "EMAIL":            "EMAIL",
     "GIVENNAME":        "PERSON",
     "IDCARDNUM":        "NATIONAL_ID",
@@ -86,7 +93,7 @@ PIIRANHA_MAP = {
     "TAXNUM":           "TAX_ID",
     "TELEPHONENUM":     "PHONE_NUMBER",
     "USERNAME":         "USERNAME",
-    "ZIPCODE":          "ZIP_CODE",
+    "ZIPCODE":          "POSTCODE",
 }
 
 # nbroad/finer-139-xtremedistil-l12-h384  (FiNER-139)
@@ -98,16 +105,16 @@ FINER_DEFAULT_LABEL = "FINANCIAL_ENTITY"
 # Outputs: PER, ORG, LOC
 WIKIANN_MAP = {
     "PER": "PERSON",
-    "ORG": "ORGANIZATION",
-    "LOC": "LOCATION",
+    "ORG": "ORG",
+    "LOC": "LOC",
 }
 
 # tomaarsen/span-marker-mbert-base-multinerd  (MultiNERD)
 # Outputs: PER, ORG, LOC, ANIM, BIO, CEL, DIS, EVE, FOOD, INST, MEDIA, MYTH, PLANT, TIME, VEHI
 MULTINERD_MAP = {
     "PER":   "PERSON",
-    "ORG":   "ORGANIZATION",
-    "LOC":   "LOCATION",
+    "ORG":   "ORG",
+    "LOC":   "LOC",
     "ANIM":  "O",
     "BIO":   "O",
     "CEL":   "O",
@@ -127,8 +134,8 @@ MULTINERD_MAP = {
 # We match by prefix (category before the hyphen).
 FEWNERD_CATEGORY_MAP = {
     "person":       "PERSON",
-    "organization": "ORGANIZATION",
-    "location":     "LOCATION",
+    "organization": "ORG",
+    "location":     "LOC",
     "other":        "O",    # "other-currency", "other-disease" etc. don't cleanly map
     "art":          "O",
     "building":     "O",
@@ -153,6 +160,14 @@ def load_records(jsonl_path: Path) -> list:
             if line:
                 records.append(json.loads(line))
     return records
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def tokens_to_text(tokens: list) -> str:
@@ -478,6 +493,9 @@ def main(args):
     output_path = Path(args.output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    if args.device == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("--device cuda requested, but CUDA is not available.")
+
     device_int = 0 if (torch.cuda.is_available() and args.device != "cpu") else -1
     device_str = "cuda:0" if device_int == 0 else "cpu"
     print(f"Device: {device_str}")
@@ -494,8 +512,12 @@ def main(args):
 
     all_results = {
         "test_path":   str(test_path),
+        "test_sha256": sha256(test_path),
         "num_records": len(records),
         "device":      device_str,
+        "metric":      "seqeval exact span and entity type match",
+        "taxonomy":    "corrected PIIBench 82-entity taxonomy",
+        "label_alignment_revision": "corrected_canonical_v1",
         "models":      {},
     }
 
@@ -504,18 +526,31 @@ def main(args):
         try:
             with open(output_path, encoding="utf-8") as f:
                 existing = json.load(f)
-            all_results["models"].update(existing.get("models", {}))
-            print(f"Resumed from existing results: {list(all_results['models'].keys())}")
+            same_input = existing.get("test_sha256") == all_results["test_sha256"]
+            same_alignment = (
+                existing.get("label_alignment_revision")
+                == all_results["label_alignment_revision"]
+            )
+            if same_input and same_alignment:
+                all_results["models"].update(existing.get("models", {}))
+                print(f"Resumed from existing results: {list(all_results['models'].keys())}")
+            else:
+                print(
+                    "Existing results were produced for a different test file or "
+                    "label-alignment revision; starting fresh."
+                )
         except (json.JSONDecodeError, ValueError):
-            print("Existing results file is corrupt — starting fresh.")
+            print("Existing results file is corrupt; starting fresh.")
 
     for key in model_keys:
         if key not in MODELS:
             print(f"Unknown model key '{key}', skipping. Valid keys: {list(MODELS.keys())}")
             continue
-        if key in all_results["models"]:
+        if key in all_results["models"] and "error" not in all_results["models"][key]:
             print(f"\nSkipping {key} (already in results file)")
             continue
+        if key in all_results["models"]:
+            print(f"\nRetrying {key} because the existing entry records an error.")
 
         cfg = MODELS[key]
         print(f"\n{'='*60}")
@@ -632,8 +667,8 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--test-path",   type=str, default="data/splits/test_1p.jsonl",
-                        help="Path to test JSONL (test_1p.jsonl or test.jsonl)")
+    parser.add_argument("--test-path",   type=str, default="data/test_5k.jsonl",
+                        help="Path to test JSONL (default: corrected data/test_5k.jsonl)")
     parser.add_argument("--output-path", type=str, default="benchmark_results/existing_models_results.json",
                         help="Where to save results JSON")
     parser.add_argument("--models",      type=str, nargs="+",

@@ -2,17 +2,18 @@
 Benchmark three PII/NER systems on the project test set:
 
     1. Our model   — FastPIIDetector on models/best_model
-    2. spaCy       — en_core_web_trf  (transformer-based NER pipeline)
+    2. spaCy       — en_core_web_lg   (OntoNotes NER pipeline used in PIIBench)
     3. Presidio    — Microsoft Presidio AnalyzerEngine (rule + ML hybrid)
 
 Evaluation metric: seqeval span-level F1 / Precision / Recall, identical to
 the metric used during training. Per-entity-type breakdown is reported for
 all three systems.
 
-The ground truth is data/test.jsonl produced by the data pipeline. Each
-record has whitespace-tokenised `tokens` and BIO `labels`. We reconstruct
-the original text as " ".join(tokens), run each system against that text,
-convert predicted character spans back to BIO token labels, then evaluate.
+The ground truth is a prepared JSONL test file produced by the data pipeline
+(`data/test_5k.jsonl` for paper comparisons). Each record has
+whitespace-tokenised `tokens` and BIO `labels`. We reconstruct the original
+text as " ".join(tokens), run each system against that text, convert predicted
+character spans back to BIO token labels, then evaluate.
 
 Usage:
     # Basic run (test.jsonl and best_model must already exist)
@@ -29,18 +30,26 @@ Usage:
 
     # Custom paths
     python run_benchmarking.py \
-        --test-file   ./data/test.jsonl \
+        --test-file   ./data/test_5k.jsonl \
         --model-path  ./models/best_model \
+        --system-name "Direct DeBERTa" \
+        --confidence-threshold 0.0 \
+        --max-length 256 \
+        --device cuda \
         --output-dir  ./benchmark_results
 
     # Skip individual systems
     python run_benchmarking.py --skip-spacy
     python run_benchmarking.py --skip-presidio
     python run_benchmarking.py --skip-our-model
+
+    # Override the spaCy pipeline for an additional comparison
+    python run_benchmarking.py --spacy-model en_core_web_trf
 """
 
 import sys
 import json
+import hashlib
 import time
 import argparse
 import subprocess
@@ -67,7 +76,7 @@ from exceptions import ModelNotFoundError, ModelLoadError
 # Entity type normalisation maps
 # ---------------------------------------------------------------------------
 
-# spaCy en_core_web_trf OntoNotes label -> our label (or None to discard)
+# spaCy OntoNotes label -> our label (or None to discard)
 SPACY_LABEL_MAP: Dict[str, Optional[str]] = {
     "PERSON":      "PERSON",
     "ORG":         "ORG",
@@ -75,7 +84,7 @@ SPACY_LABEL_MAP: Dict[str, Optional[str]] = {
     "LOC":         "LOC",
     "FAC":         "LOC",       # facility -> LOC
     "DATE":        "DATE",
-    "TIME":        "DATE",
+    "TIME":        "TIME",
     "MONEY":       "AMOUNT",
     "CARDINAL":    None,        # numbers — not PII
     "ORDINAL":     None,
@@ -93,19 +102,19 @@ SPACY_LABEL_MAP: Dict[str, Optional[str]] = {
 PRESIDIO_LABEL_MAP: Dict[str, Optional[str]] = {
     "PERSON":                  "PERSON",
     "EMAIL_ADDRESS":           "EMAIL",
-    "PHONE_NUMBER":            "PHONE",
+    "PHONE_NUMBER":            "PHONE_NUMBER",
     "US_SSN":                  "SSN",
     "US_BANK_NUMBER":          "ACCOUNT_NUMBER",
     "CREDIT_CARD":             "CREDIT_CARD",
     "IBAN_CODE":               "IBAN",
     "IP_ADDRESS":              "IP_ADDRESS",
     "URL":                     "URL",
-    "DATE_TIME":               "DATE",
+    "DATE_TIME":               "DATE_TIME",
     "LOCATION":                "LOC",
     "ORGANIZATION":            "ORG",
-    "US_DRIVER_LICENSE":       "SSN",   # closest analogue
-    "US_PASSPORT":             "SSN",
-    "US_ITIN":                 "SSN",
+    "US_DRIVER_LICENSE":       "DRIVER_LICENSE_NUMBER",
+    "US_PASSPORT":             "PASSPORT_NUMBER",
+    "US_ITIN":                 "TAX_ID",
     "MEDICAL_LICENSE":         None,
     "NRP":                     None,    # nationality / religion / political
     "CRYPTO":                  "CRYPTO_ADDRESS",
@@ -115,8 +124,8 @@ PRESIDIO_LABEL_MAP: Dict[str, Optional[str]] = {
     "AU_ACN":                  None,
     "AU_TFN":                  None,
     "AU_MEDICARE":             None,
-    "IN_PAN":                  "SSN",
-    "IN_AADHAAR":              "SSN",
+    "IN_PAN":                  "TAX_ID",
+    "IN_AADHAAR":              "NATIONAL_ID",
     "IN_VEHICLE_REGISTRATION": None,
 }
 
@@ -143,6 +152,14 @@ def load_test_records(path: Path, max_records: Optional[int]) -> List[Dict]:
         records = records[:max_records]
     print(f"Loaded {len(records):,} test records from {path}")
     return records
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -250,6 +267,9 @@ def run_our_model(
     records: List[Dict],
     model_path: str,
     batch_size: int,
+    confidence_threshold: float,
+    max_length: int,
+    device: Optional[str],
 ) -> Tuple[List[List[str]], List[List[str]], float]:
     """
     Returns (true_labels, pred_labels, elapsed_seconds).
@@ -259,8 +279,10 @@ def run_our_model(
     try:
         detector = FastPIIDetector(
             model_path=model_path,
-            confidence_threshold=0.5,
+            confidence_threshold=confidence_threshold,
             batch_size=batch_size,
+            device=device,
+            max_length=max_length,
         )
     except (ModelNotFoundError, ModelLoadError) as exc:
         raise RuntimeError(str(exc)) from exc
@@ -291,6 +313,7 @@ def run_our_model(
 def run_spacy(
     records: List[Dict],
     batch_size: int,
+    model_name: str,
 ) -> Tuple[List[List[str]], List[List[str]], float]:
     try:
         import spacy
@@ -300,11 +323,11 @@ def run_spacy(
         ) from exc
 
     try:
-        nlp = spacy.load("en_core_web_trf")
+        nlp = spacy.load(model_name)
     except OSError as exc:
         raise RuntimeError(
-            "spaCy model 'en_core_web_trf' not found. "
-            "Run: python -m spacy download en_core_web_trf"
+            f"spaCy model '{model_name}' not found. "
+            f"Run: python -m spacy download {model_name}"
         ) from exc
 
     texts       = [" ".join(r["tokens"]) for r in records]
@@ -390,27 +413,16 @@ def run_presidio(
 def download_deps(run_data_pipeline: bool, data_pipeline_args: List[str]):
     print("\n[DEPS] Downloading dependencies ...")
 
-    # spaCy model
-    print("  Downloading spaCy en_core_web_trf ...")
-    try:
-        subprocess.run(
-            [sys.executable, "-m", "spacy", "download", "en_core_web_trf"],
-            check=True,
-        )
-        print("  spaCy model downloaded.")
-    except subprocess.CalledProcessError as exc:
-        print(f"  WARNING: spaCy download failed: {exc}")
-
-    # Presidio NLP models (downloads spaCy en_core_web_lg used by default engine)
-    print("  Downloading Presidio default NLP models ...")
+    # This is the spaCy pipeline used directly and by Presidio in the PIIBench comparison.
+    print("  Downloading spaCy en_core_web_lg ...")
     try:
         subprocess.run(
             [sys.executable, "-m", "spacy", "download", "en_core_web_lg"],
             check=True,
         )
-        print("  Presidio NLP model downloaded.")
+        print("  spaCy model downloaded.")
     except subprocess.CalledProcessError as exc:
-        print(f"  WARNING: Presidio NLP model download failed: {exc}")
+        print(f"  WARNING: spaCy download failed: {exc}")
 
     # Data pipeline
     if run_data_pipeline:
@@ -507,29 +519,46 @@ def print_classification_reports(all_metrics: List[Dict]):
 # Save results
 # ---------------------------------------------------------------------------
 
+def to_json_native(value):
+    """Convert seqeval/numpy values into objects accepted by json.dump."""
+    if isinstance(value, dict):
+        return {key: to_json_native(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [to_json_native(item) for item in value]
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.floating):
+        return float(value)
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    return value
+
+
 def save_results(
     all_metrics: List[Dict],
     elapsed: Dict[str, float],
     output_dir: Path,
     num_records: int,
+    evaluation_config: Dict,
 ):
     output_dir.mkdir(parents=True, exist_ok=True)
 
     payload = {
         "num_test_records": num_records,
+        "evaluation_config": evaluation_config,
         "systems":          all_metrics,
         "elapsed_seconds":  elapsed,
     }
     out_path = output_dir / "benchmark_results.json"
     with open(out_path, "w") as f:
-        json.dump(payload, f, indent=2)
+        json.dump(to_json_native(payload), f, indent=2)
     print(f"\nResults saved to: {out_path}")
 
     # Per-system seqeval report as text
     for m in all_metrics:
         report_path = output_dir / f"report_{m['system'].lower().replace(' ', '_')}.json"
         with open(report_path, "w") as f:
-            json.dump(m, f, indent=2)
+            json.dump(to_json_native(m), f, indent=2)
 
 
 # ---------------------------------------------------------------------------
@@ -553,6 +582,12 @@ def main():
         help="Path to fine-tuned model directory (default: ./models/best_model)",
     )
     parser.add_argument(
+        "--system-name",
+        type=str,
+        default="Our Model",
+        help="Name written into the trained-model results row (default: Our Model)",
+    )
+    parser.add_argument(
         "--output-dir",
         type=str,
         default="./benchmark_results",
@@ -569,6 +604,36 @@ def main():
         type=int,
         default=32,
         help="Batch size for our model and spaCy pipe (default: 32)",
+    )
+    parser.add_argument(
+        "--confidence-threshold",
+        type=float,
+        default=0.0,
+        help=(
+            "Entity confidence threshold for trained models. Default 0.0 "
+            "matches argmax token-classification evaluation."
+        ),
+    )
+    parser.add_argument(
+        "--max-length",
+        type=int,
+        default=256,
+        help="Maximum sequence length for trained-model inference (default: 256).",
+    )
+    parser.add_argument(
+        "--device",
+        choices=["auto", "cpu", "cuda"],
+        default="auto",
+        help="Device for trained-model inference. Use cuda for GPU benchmark runs.",
+    )
+    parser.add_argument(
+        "--spacy-model",
+        type=str,
+        default="en_core_web_lg",
+        help=(
+            "spaCy pipeline to benchmark. Default is en_core_web_lg, matching "
+            "the original PIIBench paper."
+        ),
     )
     parser.add_argument(
         "--download-deps",
@@ -588,7 +653,7 @@ def main():
     parser.add_argument(
         "--skip-spacy",
         action="store_true",
-        help="Skip spaCy en_core_web_trf",
+        help="Skip the configured spaCy model",
     )
     parser.add_argument(
         "--skip-presidio",
@@ -597,6 +662,11 @@ def main():
     )
 
     args = parser.parse_args()
+
+    if args.device == "cuda":
+        import torch
+        if not torch.cuda.is_available():
+            parser.error("--device cuda requested, but CUDA is not available.")
 
     print("=" * 70)
     print("PII DETECTION — BENCHMARKING")
@@ -631,11 +701,16 @@ def main():
         print("\n[2/2] Running our model ...")
         try:
             true_labels, pred_labels, secs = run_our_model(
-                records, args.model_path, args.batch_size
+                records,
+                args.model_path,
+                args.batch_size,
+                args.confidence_threshold,
+                args.max_length,
+                None if args.device == "auto" else args.device,
             )
-            metrics = compute_metrics(true_labels, pred_labels, "Our Model")
+            metrics = compute_metrics(true_labels, pred_labels, args.system_name)
             all_metrics.append(metrics)
-            elapsed["Our Model"] = secs
+            elapsed[args.system_name] = secs
             print(f"  Done in {secs:.1f}s — F1: {metrics['overall_f1']:.4f}")
         except Exception as exc:
             print(f"  ERROR running our model: {exc}")
@@ -646,12 +721,15 @@ def main():
     # spaCy
     # ------------------------------------------------------------------
     if not args.skip_spacy:
-        print("\n[2/2] Running spaCy en_core_web_trf ...")
+        system_name = f"spaCy {args.spacy_model}"
+        print(f"\n[2/2] Running {system_name} ...")
         try:
-            true_labels, pred_labels, secs = run_spacy(records, args.batch_size)
-            metrics = compute_metrics(true_labels, pred_labels, "spaCy trf")
+            true_labels, pred_labels, secs = run_spacy(
+                records, args.batch_size, args.spacy_model
+            )
+            metrics = compute_metrics(true_labels, pred_labels, system_name)
             all_metrics.append(metrics)
-            elapsed["spaCy trf"] = secs
+            elapsed[system_name] = secs
             print(f"  Done in {secs:.1f}s — F1: {metrics['overall_f1']:.4f}")
         except Exception as exc:
             print(f"  ERROR running spaCy: {exc}")
@@ -665,9 +743,9 @@ def main():
         print("\n[2/2] Running Microsoft Presidio ...")
         try:
             true_labels, pred_labels, secs = run_presidio(records)
-            metrics = compute_metrics(true_labels, pred_labels, "Presidio")
+            metrics = compute_metrics(true_labels, pred_labels, "Microsoft Presidio")
             all_metrics.append(metrics)
-            elapsed["Presidio"] = secs
+            elapsed["Microsoft Presidio"] = secs
             print(f"  Done in {secs:.1f}s — F1: {metrics['overall_f1']:.4f}")
         except Exception as exc:
             print(f"  ERROR running Presidio: {exc}")
@@ -688,7 +766,24 @@ def main():
     # ------------------------------------------------------------------
     # Save
     # ------------------------------------------------------------------
-    save_results(all_metrics, elapsed, Path(args.output_dir), len(records))
+    save_results(
+        all_metrics,
+        elapsed,
+        Path(args.output_dir),
+        len(records),
+        {
+            "test_file": args.test_file,
+            "test_file_sha256": sha256(Path(args.test_file)),
+            "model_path": args.model_path,
+            "trained_model_confidence_threshold": args.confidence_threshold,
+            "trained_model_max_length": args.max_length,
+            "trained_model_device": args.device,
+            "spacy_model": args.spacy_model,
+            "metric": "seqeval exact span and entity type match",
+            "taxonomy": "corrected PIIBench 82-entity taxonomy",
+            "label_alignment_revision": "corrected_canonical_v1",
+        },
+    )
 
 
 if __name__ == "__main__":

@@ -197,6 +197,37 @@ The saved novelty model is written to `models/full_novel/final_model`.
 Hierarchical novelty models include metadata so `PIIDetector` can load the
 custom head.
 
+Full novelty run with source conditioning, curriculum learning, and the
+hierarchical head:
+
+```bash
+export TOKENIZERS_PARALLELISM=false
+
+python run_training_pipeline.py \
+    --novel \
+    --source-cond \
+    --curriculum \
+    --hierarchical \
+    --novel-output-dir ./models/full_novel_curriculum \
+    --max-length 256 \
+    --batch-size 6 \
+    --eval-batch-size 8 \
+    --grad-accum 10 \
+    --eval-steps 1000 \
+    --save-steps 1000 \
+    --logging-steps 50 \
+    --eval-accumulation-steps 1 \
+    --gradient-checkpointing \
+    --skip-final-eval
+```
+
+Curriculum mode trains one epoch in each of three ordered source-family phases
+(`general NER -> synthetic PII -> financial PII`); `--epochs` and
+`--max-steps` do not control this schedule. Checkpoints are written under
+`models/full_novel_curriculum/phase_1`, `phase_2`, and `phase_3`. Repeat the
+same command with `--skip-download --resume-from-checkpoint` after an
+interruption.
+
 ## Inference
 
 ### PIIDetector (single-text / sequential batch)
@@ -335,26 +366,43 @@ Demonstrates all four endpoints including file upload for `.txt` and `.csv`.
 
 ## Benchmarking
 
-Evaluates our model against spaCy `en_core_web_trf` and Microsoft Presidio on the test split using seqeval span-level F1.
+For paper comparisons, generate the fixed corrected held-out benchmark subset.
+It contains exactly 5,000 records sampled from `data/test.jsonl` with the
+current source-stratified preparation method and seed `42`.
 
 ```bash
-# Download spaCy models first
-make download-deps
+# Create or recreate the paper-comparison subset
+python create_evaluation_subset.py
 
-# Run benchmark on full test set
-make benchmark
+# Evaluate a trained model, the spaCy model used in PIIBench, and Presidio
+python run_benchmarking.py \
+  --test-file ./data/test_5k.jsonl \
+  --model-path ./models/best_model \
+  --system-name "Direct Fine-tuned DeBERTa" \
+  --confidence-threshold 0.0 \
+  --max-length 256 \
+  --device cuda \
+  --spacy-model en_core_web_lg \
+  --output-dir ./benchmark_results/corrected_test_5k/direct_spacy_presidio
 
-# Limit to first 500 records
-make benchmark N=500
+# Evaluate the six public neural baselines from PIIBench
+python run_existing_models_benchmark.py \
+  --test-path ./data/test_5k.jsonl \
+  --output-path ./benchmark_results/corrected_test_5k/public_models.json \
+  --device cuda
 
-# Skip individual systems
-python run_benchmarking.py --skip-spacy
-python run_benchmarking.py --skip-presidio
+# After also evaluating the novelty model, compile and validate all ten rows
+python compile_comparative_results.py
 ```
 
 Entity type normalisation maps are defined in `run_benchmarking.py` (`SPACY_LABEL_MAP`, `PRESIDIO_LABEL_MAP`) to align external systems to our label set before evaluation.
 
-Results are written to `./benchmark_results/benchmark_results.json` and per-system report JSONs.
+The novelty model is evaluated by running `run_benchmarking.py` again with
+its exported best model and a distinct `--system-name`. Full commands and
+benchmark rationale are in `docs/corrected-test-5k-benchmark.md`.
+`compile_comparative_results.py` will fail unless Microsoft Presidio, spaCy,
+the six public neural comparators, and both trained models are all present on
+the identical held-out subset.
 
 ## Makefile targets
 

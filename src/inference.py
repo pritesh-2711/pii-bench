@@ -89,9 +89,11 @@ class PIIDetector:
         model_path: str,
         confidence_threshold: float = 0.5,
         device: Optional[str] = None,
+        max_length: int = 512,
     ):
         self.model_path           = Path(model_path)
         self.confidence_threshold = confidence_threshold
+        self.max_length           = max_length
 
         self._validate_model_path()
 
@@ -104,7 +106,7 @@ class PIIDetector:
             raise ModelLoadError(str(self.model_path), str(exc)) from exc
 
         try:
-            self.tokenizer = AutoTokenizer.from_pretrained(str(self.model_path))
+            self.tokenizer = self._load_tokenizer()
             self.config = AutoConfig.from_pretrained(str(self.model_path))
             self.source_conditioned = bool(
                 getattr(self.config, "pii_source_conditioned", False)
@@ -258,6 +260,19 @@ class PIIDetector:
 
         return AutoModelForTokenClassification.from_pretrained(str(self.model_path))
 
+    def _load_tokenizer(self):
+        try:
+            return AutoTokenizer.from_pretrained(str(self.model_path))
+        except AttributeError as exc:
+            # Tokenizers saved by older/newer Transformers versions may store
+            # extra_special_tokens as a list while newer loaders expect a dict.
+            if "'list' object has no attribute 'keys'" not in str(exc):
+                raise
+            return AutoTokenizer.from_pretrained(
+                str(self.model_path),
+                extra_special_tokens={},
+            )
+
     def _prepare_model_text(self, text: str) -> Tuple[str, int]:
         if not getattr(self, "source_conditioned", False):
             return text, 0
@@ -291,7 +306,7 @@ class PIIDetector:
                 model_text,
                 return_tensors="pt",
                 truncation=True,
-                max_length=512,
+                max_length=self.max_length,
                 padding=False,
                 return_offsets_mapping=True,
             )
@@ -409,8 +424,9 @@ class FastPIIDetector(PIIDetector):
         confidence_threshold: float = 0.5,
         batch_size: int = 32,
         device: Optional[str] = None,
+        max_length: int = 512,
     ):
-        super().__init__(model_path, confidence_threshold, device)
+        super().__init__(model_path, confidence_threshold, device, max_length)
         self.batch_size = batch_size
 
     def batch_detect(self, texts: List[str]) -> List[PIIResult]:
@@ -488,7 +504,7 @@ class FastPIIDetector(PIIDetector):
                 [self._prepare_model_text(text)[0] for text in texts],
                 return_tensors="pt",
                 truncation=True,
-                max_length=512,
+                max_length=self.max_length,
                 padding=True,
                 return_offsets_mapping=True,
             )
