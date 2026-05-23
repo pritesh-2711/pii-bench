@@ -5,6 +5,7 @@ Loads the consolidated PII dataset, applies:
   - nvidia_nemotron cleanup: keep PII-bearing rows only, then target 10% share
   - stratified 80/10/10 split by source
   - 1% eval subsets: data/val_1p.jsonl and data/test_1p.jsonl
+  - paper benchmark subset: data/test_5k.jsonl (5,000 held-out test records)
 
 Outputs:
   data/train.jsonl
@@ -12,6 +13,7 @@ Outputs:
   data/test.jsonl
   data/val_1p.jsonl      <- ~1,400 records, used for fast intra-training eval
   data/test_1p.jsonl     <- ~1,400 records, used for fast milestone checks
+  data/test_5k.jsonl     <- 5,000 records, used for external-system comparison
   data/label_mapping.json
 
 The 1p subsets are stratified by source so entity type distribution matches
@@ -35,6 +37,7 @@ NVIDIA_TARGET_SHARE = 0.10
 TRAIN_RATIO = 0.8
 VAL_RATIO = 0.1
 SUBSET_FRACTION = 0.01   # 1% of val/test for fast intra-training eval
+PAPER_EVAL_SUBSET_SIZE = 5_000
 RANDOM_SEED = 42
 
 
@@ -228,6 +231,64 @@ def make_stratified_subset(records: list, fraction: float, seed: int) -> list:
     return subset
 
 
+def make_stratified_subset_by_size(records: list, target_size: int, seed: int) -> list:
+    """
+    Sample an exact target number of records while preserving source ratios.
+
+    Allocation uses largest remainders after proportional allocation and
+    guarantees representation of every source when the target permits it.
+    """
+    if not records:
+        return []
+    if target_size <= 0:
+        raise ValueError("target_size must be greater than zero")
+    if target_size >= len(records):
+        return list(records)
+
+    rng = random.Random(seed)
+    by_source = defaultdict(list)
+    for rec in records:
+        by_source[rec["source"]].append(rec)
+
+    if target_size < len(by_source):
+        raise ValueError("target_size must be at least the number of sources")
+
+    total = len(records)
+    quota = {
+        source: target_size * len(recs) / total
+        for source, recs in by_source.items()
+    }
+    allocation = {
+        source: min(len(recs), max(1, int(quota[source])))
+        for source, recs in by_source.items()
+    }
+
+    while sum(allocation.values()) < target_size:
+        candidates = [
+            source for source, recs in by_source.items()
+            if allocation[source] < len(recs)
+        ]
+        source = max(
+            candidates,
+            key=lambda s: (quota[s] - allocation[s], len(by_source[s]), s),
+        )
+        allocation[source] += 1
+
+    while sum(allocation.values()) > target_size:
+        candidates = [source for source in by_source if allocation[source] > 1]
+        source = min(
+            candidates,
+            key=lambda s: (quota[s] - allocation[s], len(by_source[s]), s),
+        )
+        allocation[source] -= 1
+
+    subset = []
+    for source in sorted(by_source):
+        subset.extend(rng.sample(by_source[source], allocation[source]))
+    rng.shuffle(subset)
+    return subset
+
+
 # ---------------------------------------------------------------------------
 # Label mapping
 # ---------------------------------------------------------------------------
@@ -312,7 +373,16 @@ def prepare():
         f"({len(test_1p)/len(test)*100:.1f}% of test)"
     )
 
-    # 9. Save label mapping
+    # 9. Save an exact-size held-out benchmark subset for paper comparisons.
+    print(f"\nCreating {PAPER_EVAL_SUBSET_SIZE:,}-record paper benchmark subset ...")
+    test_5k = make_stratified_subset_by_size(test, PAPER_EVAL_SUBSET_SIZE, RANDOM_SEED)
+    save_split(test_5k, OUTPUT_DIR / "test_5k.jsonl")
+    print(
+        f"  test_5k : {len(test_5k):,} records "
+        f"({len(test_5k)/len(test)*100:.1f}% of test)"
+    )
+
+    # 10. Save label mapping
     mapping = {
         "labels": labels,
         "label2id": label2id,
@@ -337,6 +407,7 @@ def prepare():
     print(f"  Test records        : {len(test):,}")
     print(f"  val_1p records      : {len(val_1p):,}  <- fast intra-training eval")
     print(f"  test_1p records     : {len(test_1p):,}  <- fast milestone checks")
+    print(f"  test_5k records     : {len(test_5k):,}  <- paper benchmark comparison")
 
     return mapping
 

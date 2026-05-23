@@ -100,6 +100,7 @@ def run_pipeline(
     print(f"  Train split       : {output_path / 'train.jsonl'}")
     print(f"  Val split         : {output_path / 'val.jsonl'}")
     print(f"  Test split        : {output_path / 'test.jsonl'}")
+    print(f"  Paper eval subset : {output_path / 'test_5k.jsonl'}")
     print(f"  Label mapping     : {output_path / 'label_mapping.json'}")
     print(f"  Entity types kept : {len(mapping['kept_entity_types'])}")
     print(f"  Total labels      : {mapping['num_labels']}")

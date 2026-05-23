@@ -295,15 +295,15 @@ print(result.to_dict())
   accumulation in the default Trainer evaluation loop.
 - Reported metrics are from `val_1p`, not the full test set.
 - The best checkpoint selection is based on the fast validation subset.
-- Additional benchmark scripts should be used for final full-test metrics in a
-  streaming or chunked manner.
+- Final comparisons against external systems should use the corrected
+  held-out `test_5k` benchmark protocol in
+  `docs/corrected-test-5k-benchmark.md`.
 
 ## Follow-Up Work
 
-1. Run chunked/streaming evaluation on the full `test.jsonl`.
-2. Compare against spaCy and Presidio using `run_benchmarking.py`.
-3. Run the integrated novelty experiment:
-   - Source conditioning
-   - Hierarchical coarse-to-fine head
-   - Optional curriculum learning
-4. Add a no-logit-concatenation final evaluator to avoid full-test eval stalls.
+1. Compare all paper baselines and both trained DeBERTa variants on the
+   corrected held-out `data/test_5k.jsonl` subset.
+2. Preserve `data/test_5k_summary.json` with result files so the comparison
+   table is tied to its exact test artifact.
+3. Optionally run chunked/streaming evaluation on the full `test.jsonl` for an
+   additional comparison limited to the two trained models.

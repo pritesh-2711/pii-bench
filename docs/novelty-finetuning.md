@@ -390,19 +390,22 @@ configuration and applies the default source token for general inputs.
   performance.
 - The completed run does not measure the incremental contribution of source
   conditioning versus the hierarchical head separately.
-- Curriculum learning is implemented in codebase but was not evaluated in this completed
-  run. It will be the part of next training run.
+- Curriculum learning is implemented in the codebase but was not evaluated in
+  this completed run.
 
 ## Required Follow-Up For Final Reporting
 
 Before using final benchmark numbers in a paper:
 
-1. Run memory-safe, streaming evaluation of the exported baseline best model
-   on the complete held-out `test.jsonl`.
-2. Run the same evaluation of the exported novelty best model on that identical
-   test split.
-3. Report test-set precision, recall, and F1 as final results; retain the
-   `val_1p` scores only as model-selection evidence.
+1. Generate the fixed corrected held-out `data/test_5k.jsonl` benchmark with
+   the current preparation method and seed `42`.
+2. Run the eight systems from the PIIBench comparison and both trained
+   DeBERTa variants on that identical subset, following
+   `docs/corrected-test-5k-benchmark.md`.
+3. Report its precision, recall, and F1 as the controlled comparison; retain
+   the `val_1p` scores only as model-selection evidence.
+4. Optionally run the two trained models on the complete held-out
+   `test.jsonl` as an additional internal comparison.
 
 ## Result Summary
 
