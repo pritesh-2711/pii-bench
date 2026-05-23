@@ -237,7 +237,10 @@ def main():
     parser.add_argument(
         "--resume-from-checkpoint",
         action="store_true",
-        help="Resume from latest checkpoint in models/checkpoints/",
+        help=(
+            "Resume from saved checkpoints. In novel curriculum mode, each "
+            "phase resumes from its latest checkpoint when present."
+        ),
     )
     parser.add_argument(
         "--fp16-full-eval",

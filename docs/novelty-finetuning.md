@@ -23,6 +23,20 @@ The completed novelty run uses:
 Curriculum learning is implemented in the codebase but was **not enabled** in
 the completed run reported here.
 
+For the subsequent full novelty experiment, curriculum mode is executed as
+three ordered, checkpointed phases:
+
+```text
+Phase 1: general NER sources
+Phase 2: synthetic PII sources
+Phase 3: financial PII sources
+```
+
+Each phase runs one epoch over its assigned source family, loads that phase's
+best validation checkpoint, and passes the resulting model into the next
+phase. Curriculum runs can be restarted with `--resume-from-checkpoint`; each
+phase resumes its most recent checkpoint when one exists.
+
 ## Proposed Approach
 
 ### Source Conditioning

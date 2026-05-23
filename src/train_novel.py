@@ -579,6 +579,7 @@ def run_curriculum_phase(
     eval_steps: int,
     save_steps: int,
     logging_steps: int,
+    resume_from_checkpoint: bool,
     model=None,
 ):
     print(f"\n{'='*60}")
@@ -607,6 +608,7 @@ def run_curriculum_phase(
 
     phase_output = output_dir / f"phase_{phase_idx + 1}"
     phase_output.mkdir(parents=True, exist_ok=True)
+    has_checkpoint = any(phase_output.glob("checkpoint-*"))
 
     args = TrainingArguments(
         output_dir=str(phase_output),
@@ -652,7 +654,10 @@ def run_curriculum_phase(
         **trainer_kwargs,
     )
 
-    trainer.train()
+    checkpoint = True if resume_from_checkpoint and has_checkpoint else None
+    if checkpoint:
+        print(f"  Resuming from latest checkpoint in {phase_output}")
+    trainer.train(resume_from_checkpoint=checkpoint)
     return trainer.model
 
 
@@ -684,7 +689,7 @@ def main(args):
         f"entity={args.entity_label_weight:.3f}"
     )
     if args.curriculum and args.resume_from_checkpoint:
-        print("Note: --resume-from-checkpoint is only applied to flat novelty runs; curriculum phases are checkpointed separately.")
+        print("Curriculum resume enabled: each phase resumes from its latest saved checkpoint when available.")
 
     # Load tokenizer
     model_id = resolve_model_source(args.model_id)
@@ -796,6 +801,7 @@ def main(args):
                 eval_steps=args.eval_steps,
                 save_steps=args.save_steps,
                 logging_steps=args.logging_steps,
+                resume_from_checkpoint=args.resume_from_checkpoint,
                 model=model,
             )
     else:

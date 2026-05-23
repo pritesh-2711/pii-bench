@@ -197,6 +197,37 @@ The saved novelty model is written to `models/full_novel/final_model`.
 Hierarchical novelty models include metadata so `PIIDetector` can load the
 custom head.
 
+Full novelty run with source conditioning, curriculum learning, and the
+hierarchical head:
+
+```bash
+export TOKENIZERS_PARALLELISM=false
+
+python run_training_pipeline.py \
+    --novel \
+    --source-cond \
+    --curriculum \
+    --hierarchical \
+    --novel-output-dir ./models/full_novel_curriculum \
+    --max-length 256 \
+    --batch-size 6 \
+    --eval-batch-size 8 \
+    --grad-accum 10 \
+    --eval-steps 1000 \
+    --save-steps 1000 \
+    --logging-steps 50 \
+    --eval-accumulation-steps 1 \
+    --gradient-checkpointing \
+    --skip-final-eval
+```
+
+Curriculum mode trains one epoch in each of three ordered source-family phases
+(`general NER -> synthetic PII -> financial PII`); `--epochs` and
+`--max-steps` do not control this schedule. Checkpoints are written under
+`models/full_novel_curriculum/phase_1`, `phase_2`, and `phase_3`. Repeat the
+same command with `--skip-download --resume-from-checkpoint` after an
+interruption.
+
 ## Inference
 
 ### PIIDetector (single-text / sequential batch)
