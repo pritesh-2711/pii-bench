@@ -31,6 +31,7 @@ pii-detector/
 ├── run_data_pipeline.py           # Orchestrates steps 1-3 of data prep
 ├── run_training_pipeline.py       # Orchestrates model download + fine-tuning
 ├── run_benchmarking.py            # Benchmarks our model vs spaCy vs Presidio
+├── run_streaming_model_benchmark.py # Full-test evaluation for a trained model
 ├── test_detector.py               # Test suite
 ├── example_client.py              # API client demo
 ├── Makefile                       # Convenience targets
@@ -408,6 +409,45 @@ interpretation are in `docs/novelty-finetuning.md`.
 the six public neural comparators, and both trained models are all present on
 the identical held-out subset. The curriculum result is optional and is
 validated against the same held-out subset when supplied.
+
+### Full Test Evaluation For A Trained Model
+
+Use the streaming evaluator for the complete prepared test split. It keeps
+only 5,000 input records in host memory at a time and uses smaller GPU
+minibatches within each chunk, which is appropriate for an 8 GB RTX 4070.
+If a CUDA out-of-memory error occurs, the current chunk is retried with a
+smaller inference minibatch.
+
+```bash
+python run_streaming_model_benchmark.py \
+  --test-file ./data/test.jsonl \
+  --model-path ../cloud_runs/baseline/models/best_model \
+  --system-name "Direct Fine-tuned DeBERTa" \
+  --confidence-threshold 0.0 \
+  --max-length 256 \
+  --device cuda \
+  --chunk-size 5000 \
+  --batch-size 8 \
+  --output-dir ./benchmark_results/full_test/direct_deberta
+
+python run_streaming_model_benchmark.py \
+  --test-file ./data/test.jsonl \
+  --model-path ../cloud_runs/novelty/best_model \
+  --system-name "Source-conditioned Hierarchical DeBERTa" \
+  --confidence-threshold 0.0 \
+  --max-length 256 \
+  --device cuda \
+  --chunk-size 5000 \
+  --batch-size 6 \
+  --output-dir ./benchmark_results/full_test/source_conditioned_hierarchical
+
+python analyze_full_test_comparison.py
+```
+
+The script writes cumulative progress after every chunk to
+`streaming_progress.json` and writes the final comparable metrics to
+`benchmark_results.json`. The analysis command validates the shared test hash
+and produces entity-level and hierarchical-group comparison tables.
 
 ## Makefile targets
 
