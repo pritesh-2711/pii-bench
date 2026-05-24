@@ -266,9 +266,12 @@ The completed controlled comparison on the corrected held-out
 | `val_1p` model-selection subset | 994 | 0.6445 | 0.5771 | 0.7298 |
 | `test_5k` controlled comparison subset | 5,000 | **0.6476** | **0.6300** | **0.6662** |
 
-On `test_5k`, direct fine-tuned DeBERTa is the strongest of all ten evaluated
-systems. It exceeds the strongest original PIIBench comparator in this new
-benchmark, SpanMarker BERT (`F1 0.1723`), by `0.4753` absolute F1.
+On `test_5k`, direct fine-tuned DeBERTa is the strongest of all eleven
+evaluated systems after inclusion of the curriculum variant. It exceeds the
+strongest original PIIBench comparator in this new benchmark, SpanMarker BERT
+(`F1 0.1723`), by `0.4753` absolute F1. It also exceeds the
+curriculum-enabled source-conditioned hierarchical model (`F1 0.2772`) by
+`0.3704` absolute F1.
 
 The model was exported as:
 
@@ -308,5 +311,5 @@ print(result.to_dict())
 - A final controlled test result is available on `test_5k`; a metric on the
   complete 100,002-record `test.jsonl` split is not available.
 - The best checkpoint selection is based on the fast validation subset.
-- The controlled benchmark contains BIO continuation irregularities documented
-  in `docs/corrected-test-5k-benchmark.md`.
+- The controlled benchmark contains BIO continuation irregularities recorded
+  in `data/test_5k_summary.json`.

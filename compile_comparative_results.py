@@ -2,7 +2,8 @@
 
 The compiler deliberately refuses partial result sets: the reported table must
 contain the original eight PIIBench comparators and both trained models, all
-evaluated on the identical corrected held-out subset.
+evaluated on the identical corrected held-out subset. A separately trained
+curriculum variant can be added once its held-out result exists.
 """
 
 import argparse
@@ -88,6 +89,14 @@ TRAINED_SYSTEMS = [
     },
 ]
 
+CURRICULUM_SYSTEM = {
+    "system": "Source-conditioned Hierarchical DeBERTa + Curriculum",
+    "source_dataset": "Corrected PIIBench train split",
+    "type": "Proposed method + curriculum",
+    "result_source": "curriculum",
+    "result_key": "Source-conditioned Hierarchical DeBERTa + Curriculum",
+}
+
 
 def load_json(path: Path) -> dict:
     if not path.exists():
@@ -158,7 +167,10 @@ def write_markdown(rows: list, path: Path):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Validate and compile all ten corrected benchmark systems."
+        description=(
+            "Validate and compile the ten required corrected benchmark systems, "
+            "optionally adding the curriculum variant."
+        )
     )
     parser.add_argument(
         "--novelty-results",
@@ -173,6 +185,11 @@ def main():
         default="./benchmark_results/corrected_test_5k/public_models.json",
     )
     parser.add_argument(
+        "--curriculum-results",
+        default=None,
+        help="Optional held-out benchmark_results.json for the curriculum-enabled model.",
+    )
+    parser.add_argument(
         "--output-dir",
         default="./benchmark_results/corrected_test_5k",
     )
@@ -183,6 +200,11 @@ def main():
         "direct": load_json(Path(args.direct_results)),
         "public": load_json(Path(args.public_results)),
     }
+    trained_systems = list(TRAINED_SYSTEMS)
+    if args.curriculum_results:
+        result_sets["curriculum"] = load_json(Path(args.curriculum_results))
+        trained_systems.append(CURRICULUM_SYSTEM)
+
     hashes = {source: dataset_hash(payload, source) for source, payload in result_sets.items()}
     if not all(hashes.values()) or len(set(hashes.values())) != 1:
         raise ValueError(f"Result files do not share one non-empty test SHA-256: {hashes}")
@@ -197,7 +219,7 @@ def main():
 
     rows = [
         extract_metrics(spec, result_sets)
-        for spec in ORIGINAL_SYSTEMS + TRAINED_SYSTEMS
+        for spec in ORIGINAL_SYSTEMS + trained_systems
     ]
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -211,7 +233,7 @@ def main():
                 "test_file_sha256": next(iter(hashes.values())),
                 "num_test_records": num_records,
                 "required_original_comparators": len(ORIGINAL_SYSTEMS),
-                "trained_models": len(TRAINED_SYSTEMS),
+                "trained_models": len(trained_systems),
                 "systems": rows,
             },
             f,
@@ -223,7 +245,7 @@ def main():
         writer.writerows(rows)
     write_markdown(rows, md_path)
 
-    print(f"Validated {len(ORIGINAL_SYSTEMS)} original comparators and {len(TRAINED_SYSTEMS)} trained models.")
+    print(f"Validated {len(ORIGINAL_SYSTEMS)} original comparators and {len(trained_systems)} trained models.")
     print(f"Test SHA-256: {next(iter(hashes.values()))}")
     print(f"Test records: {num_records:,}")
     print(f"Results table -> {md_path}")

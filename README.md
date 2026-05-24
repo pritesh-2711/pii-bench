@@ -391,18 +391,23 @@ python run_existing_models_benchmark.py \
   --output-path ./benchmark_results/corrected_test_5k/public_models.json \
   --device cuda
 
-# After also evaluating the novelty model, compile and validate all ten rows
+# After also evaluating the non-curriculum novelty model, compile the required ten rows
 python compile_comparative_results.py
+
+# After evaluating the curriculum variant, include it as an eleventh row
+python compile_comparative_results.py \
+  --curriculum-results ./benchmark_results/corrected_test_5k/curriculum/benchmark_results.json
 ```
 
 Entity type normalisation maps are defined in `run_benchmarking.py` (`SPACY_LABEL_MAP`, `PRESIDIO_LABEL_MAP`) to align external systems to our label set before evaluation.
 
-The novelty model is evaluated by running `run_benchmarking.py` again with
-its exported best model and a distinct `--system-name`. Full commands and
-benchmark rationale are in `docs/corrected-test-5k-benchmark.md`.
+Novelty models are evaluated by running `run_benchmarking.py` again with each
+exported model and a distinct `--system-name`. Completed results and
+interpretation are in `docs/novelty-finetuning.md`.
 `compile_comparative_results.py` will fail unless Microsoft Presidio, spaCy,
 the six public neural comparators, and both trained models are all present on
-the identical held-out subset.
+the identical held-out subset. The curriculum result is optional and is
+validated against the same held-out subset when supplied.
 
 ## Makefile targets
 

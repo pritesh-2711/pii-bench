@@ -20,8 +20,9 @@ The completed novelty run uses:
 - The complete prepared training split.
 - Fast repeated model selection on `val_1p`.
 
-Curriculum learning is implemented in the codebase but was **not enabled** in
-the completed run reported here.
+Curriculum learning was **not enabled** in the primary completed run reported
+below. A separate curriculum-enabled training run has since completed and is
+documented as an additional evaluation candidate later in this document.
 
 For the subsequent full novelty experiment, curriculum mode is executed as
 three ordered, checkpointed phases:
@@ -97,15 +98,16 @@ supervised training tokens. It addresses the early failure mode where
 precision, recall, and F1 remained at zero because the model favored
 predicting only non-entity tokens.
 
-### Implemented But Not Used: Curriculum Learning
+### Additional Variant: Curriculum Learning
 
-The novelty implementation also supports source-aware curriculum learning:
+The novelty implementation supports source-aware curriculum learning:
 
 ```text
 general NER -> synthetic PII -> financial PII
 ```
 
-The completed experiment was deliberately run as a single training phase:
+The first completed novelty experiment was deliberately run as a single
+training phase:
 
 ```text
 Source conditioning: True
@@ -113,8 +115,9 @@ Curriculum learning: False
 Hierarchical head: True
 ```
 
-Therefore, the reported results isolate source conditioning and hierarchical
-classification without attributing gains to curriculum scheduling.
+Therefore, its reported results isolate source conditioning and hierarchical
+classification without attributing gains to curriculum scheduling. The later
+curriculum-enabled variant is retained as a separately evaluated experiment.
 
 ## Implementation
 
@@ -330,23 +333,69 @@ hierarchical approach.
 
 ## Controlled Held-Out Comparison
 
-The exported source-conditioned hierarchical model without curriculum was
-evaluated alongside the direct baseline and the eight original PIIBench
-comparison systems on the corrected held-out `data/test_5k.jsonl` subset.
+The exported source-conditioned hierarchical models, with and without
+curriculum, were evaluated alongside the direct baseline and the eight
+original PIIBench comparison systems on the corrected held-out
+`data/test_5k.jsonl` subset.
 
 | Approach | Evaluation Split | F1 | Precision | Recall |
 |---|---|---:|---:|---:|
 | Direct DeBERTa fine-tuning baseline | `test_5k` | **0.6476** | **0.6300** | **0.6662** |
 | Source-conditioned hierarchical DeBERTa, no curriculum | `test_5k` | 0.5899 | 0.5565 | 0.6274 |
+| Source-conditioned hierarchical DeBERTa, with curriculum | `test_5k` | 0.2772 | 0.3491 | 0.2299 |
 | Best original comparator: SpanMarker BERT | `test_5k` | 0.1723 | 0.4266 | 0.1080 |
 
 The source-conditioned hierarchical model exceeds the strongest original
-comparator by `0.4176` absolute F1. However, it trails direct fine-tuning by
+comparator by `0.04176` absolute F1. However, it trails direct fine-tuning by
 `0.0577` F1 on held-out comparison data, despite outperforming direct
 fine-tuning on `val_1p`. The appropriate conclusion is that source
 conditioning plus hierarchy alone did not improve controlled held-out
 performance in this run. The curriculum-enabled run should be treated as a
 separate experiment, not as confirmation of the no-curriculum result.
+
+## Curriculum-Enabled Variant Results
+
+A separate run completed with source conditioning, hierarchical classification,
+and three-phase curriculum learning enabled:
+
+```text
+Phase 1: general NER sources
+Phase 2: synthetic PII sources
+Phase 3: gretel_finance and finer_139
+```
+
+The run completed and its exported model was saved to:
+
+```text
+models/full_novel_curriculum/final_model
+```
+
+The training command used `--skip-final-eval`. After export, the final
+curriculum model was evaluated locally on the identical corrected
+`data/test_5k.jsonl` subset used for all comparison systems.
+
+Validation trajectory across the retained phase-best checkpoints:
+
+| Phase | Best Step | Eval F1 | Precision | Recall |
+|---|---:|---:|---:|---:|
+| Phase 1: general NER | 2,000 | 0.13074 | 0.10973 | 0.16169 |
+| Phase 2: synthetic PII | 6,000 | **0.42983** | 0.37389 | 0.50545 |
+| Phase 3: financial PII | 1,000 | 0.30474 | 0.32372 | 0.28787 |
+
+Final curriculum model held-out result:
+
+| Evaluation Split | Records | F1 | Precision | Recall |
+|---|---:|---:|---:|---:|
+| `test_5k` | 5,000 | 0.2772 | 0.3491 | 0.2299 |
+
+The curriculum final model remains above the strongest original external
+comparator by `0.1049` absolute F1, but it trails the no-curriculum novelty
+model by `0.3127` F1 and direct fine-tuning by `0.3704` F1. This is consistent
+with catastrophic forgetting during the source-restricted curriculum:
+performance rose after the synthetic PII phase, then deteriorated after the
+financial-only phase. Phase 2 may be evaluated as a diagnostic early-stopping
+ablation, but it is not the result of the completed three-phase curriculum
+model.
 
 ## Saved Results And Verification
 
@@ -388,6 +437,22 @@ c6833f5b4d3ce5285061c84e0acef6b12530db58a6910661e80763e1dd484c44
 Therefore, `novelty/best_model` is verified to contain the weights from
 checkpoint `37000`.
 
+The curriculum archive downloaded for local analysis contains:
+
+```text
+cloud_runs/curriculum/models/full_novel_curriculum/final_model/
+cloud_runs/curriculum/models/full_novel_curriculum/phase_1/
+cloud_runs/curriculum/models/full_novel_curriculum/phase_2/
+cloud_runs/curriculum/models/full_novel_curriculum/phase_3/
+cloud_runs/curriculum/models/full_novel_curriculum/curriculum_phase_summary.json
+```
+
+Its controlled held-out evaluation is stored at:
+
+```text
+benchmark_results/corrected_test_5k/curriculum/benchmark_results.json
+```
+
 ## Inference Usage
 
 After extracting the archive:
@@ -420,23 +485,27 @@ configuration and applies the default source token for general inputs.
 
 ## Known Limitations
 
-- The reported scores are model-selection scores on `val_1p`, not final test
-  performance.
 - The completed run does not measure the incremental contribution of source
   conditioning versus the hierarchical head separately.
-- Curriculum learning is implemented in the codebase but was not evaluated in
-  this completed run.
+- The three-phase curriculum schedule changes both source composition and
+  optimization trajectory; its poor final score does not establish that all
+  curriculum-learning designs will fail.
+- Phase 2 has better validation F1 than phase 3 but has not been reported as a
+  held-out model because it is not the final three-phase curriculum output.
 
 ## Reporting Status
 
-The ten-system controlled `test_5k` comparison has been completed. Report its
-scores as the held-out comparison and retain the `val_1p` scores only as
-model-selection evidence. The benchmark includes `222` BIO continuation spans
-that seqeval treats as new gold entities; this annotation note is documented
-in `docs/corrected-test-5k-benchmark.md`.
+The controlled `test_5k` comparison now includes the eight original
+comparators and three trained models: direct fine-tuning, source-conditioned
+hierarchical fine-tuning, and its curriculum-enabled variant. Report these
+held-out scores as the primary experimental comparison and retain the
+`val_1p` scores only as model-selection evidence. The benchmark includes
+`222` BIO continuation spans that seqeval treats as new gold entities; the
+generated summary records this caveat in `data/test_5k_summary.json`.
 
 Remaining optional analyses are complete-test streaming evaluation and a
-BIO-normalized sensitivity analysis.
+BIO-normalized sensitivity analysis. Evaluating the retained phase-2
+curriculum checkpoint would provide a useful early-stopping ablation.
 
 ## Result Summary
 
@@ -453,3 +522,6 @@ Recall:    0.74165
 Compared with direct DeBERTa fine-tuning, this improves validation F1 by
 `1.67%` absolute. On the completed held-out `test_5k` comparison, however,
 the same model scores `0.5899` F1 versus direct fine-tuning at `0.6476` F1.
+The curriculum-enabled variant performs more poorly still, scoring `0.2772`
+F1 on `test_5k`, with its degradation appearing after the final
+financial-specialization phase.
