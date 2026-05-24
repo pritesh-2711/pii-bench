@@ -20,8 +20,9 @@ The completed novelty run uses:
 - The complete prepared training split.
 - Fast repeated model selection on `val_1p`.
 
-Curriculum learning is implemented in the codebase but was **not enabled** in
-the completed run reported here.
+Curriculum learning was **not enabled** in the primary completed run reported
+below. A separate curriculum-enabled training run has since completed and is
+documented as an additional evaluation candidate later in this document.
 
 For the subsequent full novelty experiment, curriculum mode is executed as
 three ordered, checkpointed phases:
@@ -97,15 +98,16 @@ supervised training tokens. It addresses the early failure mode where
 precision, recall, and F1 remained at zero because the model favored
 predicting only non-entity tokens.
 
-### Implemented But Not Used: Curriculum Learning
+### Additional Variant: Curriculum Learning
 
-The novelty implementation also supports source-aware curriculum learning:
+The novelty implementation supports source-aware curriculum learning:
 
 ```text
 general NER -> synthetic PII -> financial PII
 ```
 
-The completed experiment was deliberately run as a single training phase:
+The first completed novelty experiment was deliberately run as a single
+training phase:
 
 ```text
 Source conditioning: True
@@ -113,8 +115,9 @@ Curriculum learning: False
 Hierarchical head: True
 ```
 
-Therefore, the reported results isolate source conditioning and hierarchical
-classification without attributing gains to curriculum scheduling.
+Therefore, its reported results isolate source conditioning and hierarchical
+classification without attributing gains to curriculum scheduling. The later
+curriculum-enabled variant is retained as a separately evaluated experiment.
 
 ## Implementation
 
@@ -330,14 +333,16 @@ hierarchical approach.
 
 ## Controlled Held-Out Comparison
 
-The exported source-conditioned hierarchical model without curriculum was
-evaluated alongside the direct baseline and the eight original PIIBench
-comparison systems on the corrected held-out `data/test_5k.jsonl` subset.
+The exported source-conditioned hierarchical models, with and without
+curriculum, were evaluated alongside the direct baseline and the eight
+original PIIBench comparison systems on the corrected held-out
+`data/test_5k.jsonl` subset.
 
 | Approach | Evaluation Split | F1 | Precision | Recall |
 |---|---|---:|---:|---:|
 | Direct DeBERTa fine-tuning baseline | `test_5k` | **0.6476** | **0.6300** | **0.6662** |
 | Source-conditioned hierarchical DeBERTa, no curriculum | `test_5k` | 0.5899 | 0.5565 | 0.6274 |
+| Source-conditioned hierarchical DeBERTa, with curriculum | `test_5k` | 0.2772 | 0.3491 | 0.2299 |
 | Best original comparator: SpanMarker BERT | `test_5k` | 0.1723 | 0.4266 | 0.1080 |
 
 The source-conditioned hierarchical model exceeds the strongest original
@@ -347,6 +352,128 @@ fine-tuning on `val_1p`. The appropriate conclusion is that source
 conditioning plus hierarchy alone did not improve controlled held-out
 performance in this run. The curriculum-enabled run should be treated as a
 separate experiment, not as confirmation of the no-curriculum result.
+
+## Curriculum-Enabled Variant Results
+
+A separate run completed with source conditioning, hierarchical classification,
+and three-phase curriculum learning enabled:
+
+```text
+Phase 1: general NER sources
+Phase 2: synthetic PII sources
+Phase 3: gretel_finance and finer_139
+```
+
+The run completed and its exported model was saved to:
+
+```text
+models/full_novel_curriculum/final_model
+```
+
+The training command used `--skip-final-eval`. After export, the final
+curriculum model was evaluated locally on the identical corrected
+`data/test_5k.jsonl` subset used for all comparison systems.
+
+Validation trajectory across the retained phase-best checkpoints:
+
+| Phase | Best Step | Eval F1 | Precision | Recall |
+|---|---:|---:|---:|---:|
+| Phase 1: general NER | 2,000 | 0.13074 | 0.10973 | 0.16169 |
+| Phase 2: synthetic PII | 6,000 | **0.42983** | 0.37389 | 0.50545 |
+| Phase 3: financial PII | 1,000 | 0.30474 | 0.32372 | 0.28787 |
+
+Final curriculum model held-out result:
+
+| Evaluation Split | Records | F1 | Precision | Recall |
+|---|---:|---:|---:|---:|
+| `test_5k` | 5,000 | 0.2772 | 0.3491 | 0.2299 |
+
+The curriculum final model remains above the strongest original external
+comparator by `0.1049` absolute F1, but it trails the no-curriculum novelty
+model by `0.3127` F1 and direct fine-tuning by `0.3704` F1. This is consistent
+with catastrophic forgetting during the source-restricted curriculum:
+performance rose after the synthetic PII phase, then deteriorated after the
+financial-only phase. Phase 2 may be evaluated as a diagnostic early-stopping
+ablation, but it is not the result of the completed three-phase curriculum
+model.
+
+## Full Held-Out Test Comparison
+
+After the `test_5k` ranking reversed the validation ordering, the direct
+fine-tuned model and the source-conditioned hierarchical model without
+curriculum were evaluated on the complete corrected held-out split. The
+curriculum model was not included in this final competition because it had
+already substantially underperformed both models on `test_5k`.
+
+| Model | Test Records | F1 | Precision | Recall |
+|---|---:|---:|---:|---:|
+| **Direct Fine-tuned DeBERTa** | 100,002 | **0.6455** | **0.6277** | **0.6645** |
+| Source-conditioned Hierarchical DeBERTa | 100,002 | 0.5894 | 0.5560 | 0.6270 |
+
+Both runs used the same test artifact:
+
+```text
+SHA-256: 65f8edc86399ba3f9e4ba44591d4583f9271f5d1df20e30a913305049559df77
+Metric: seqeval exact span and entity type match
+```
+
+Evaluation streamed records in 5,000-record chunks on a local NVIDIA GeForce
+RTX 4070 with 8 GB VRAM:
+
+| Model | CUDA Minibatch | Runtime (sec) | Peak Allocated VRAM | Peak Reserved VRAM |
+|---|---:|---:|---:|---:|
+| Direct Fine-tuned DeBERTa | 8 | 1123.0 | 0.955 GiB | 1.057 GiB |
+| Source-conditioned Hierarchical DeBERTa | 6 | 995.5 | 0.891 GiB | 0.977 GiB |
+
+The full test split confirms the `test_5k` ranking: the direct model improves
+on SC+H by `0.0561` absolute F1, `0.0717` precision, and `0.0375` recall.
+
+### Entity-Level Analysis
+
+Across the `82` fine-grained entity types, direct DeBERTa has higher F1 on
+`54` types and SC+H has higher F1 on `28` types. When fine-entity F1 is
+summarized within the ten hierarchical groups using support-weighted means,
+direct DeBERTa is better in every group.
+
+| Group | Support | Direct F1 | SC+H F1 | Direct Delta |
+|---|---:|---:|---:|---:|
+| FINANCIAL_NER | 58,821 | 0.3229 | 0.2412 | +0.0817 |
+| LOCATION | 53,111 | 0.7151 | 0.6729 | +0.0422 |
+| PERSON_GROUP | 46,789 | 0.8004 | 0.7515 | +0.0489 |
+| ORG_ROLE | 30,723 | 0.7422 | 0.7252 | +0.0170 |
+| TEMPORAL | 30,683 | 0.5923 | 0.5548 | +0.0376 |
+| NETWORK | 24,406 | 0.6611 | 0.5920 | +0.0691 |
+| MISC | 23,574 | 0.7318 | 0.6321 | +0.0997 |
+| CONTACT | 18,437 | 0.7087 | 0.6593 | +0.0494 |
+| CREDENTIAL | 12,882 | 0.8902 | 0.8611 | +0.0290 |
+| FINANCIAL_ID | 8,995 | 0.8763 | 0.7305 | +0.1458 |
+
+The most consequential direct-model gains include `CRYPTO_ADDRESS`
+(`+0.8629` F1, support `1,569`), `IBAN` (`+0.3743`, support `769`),
+`ACCOUNT_NUMBER` (`+0.2590`, support `2,686`), `IP_ADDRESS` (`+0.1330`,
+support `6,178`), `USERNAME` (`+0.1099`, support `8,287`), and
+`FINANCIAL_ENTITY` (`+0.0817`, support `58,821`).
+
+SC+H remains stronger for selected entities, most notably `HTTP_COOKIE`
+(`+0.3940` F1, support `595`), `DATE_TIME` (`+0.0422`, support `1,463`),
+`PHONE_NUMBER` (`+0.0132`, support `3,079`), `COORDINATE` (`+0.0195`,
+support `857`), and `COMPANY_NAME` (`+0.0073`, support `8,674`). These
+localized benefits do not outweigh direct DeBERTa's broader advantages.
+
+The complete entity and group outputs are generated by:
+
+```bash
+python analyze_full_test_comparison.py
+```
+
+and written under:
+
+```text
+benchmark_results/full_test/direct_vs_source_conditioned_hierarchical_analysis.md
+benchmark_results/full_test/direct_vs_source_conditioned_hierarchical_analysis.json
+benchmark_results/full_test/direct_vs_source_conditioned_hierarchical_entities.csv
+benchmark_results/full_test/direct_vs_source_conditioned_hierarchical_groups.csv
+```
 
 ## Saved Results And Verification
 
@@ -388,6 +515,22 @@ c6833f5b4d3ce5285061c84e0acef6b12530db58a6910661e80763e1dd484c44
 Therefore, `novelty/best_model` is verified to contain the weights from
 checkpoint `37000`.
 
+The curriculum archive downloaded for local analysis contains:
+
+```text
+cloud_runs/curriculum/models/full_novel_curriculum/final_model/
+cloud_runs/curriculum/models/full_novel_curriculum/phase_1/
+cloud_runs/curriculum/models/full_novel_curriculum/phase_2/
+cloud_runs/curriculum/models/full_novel_curriculum/phase_3/
+cloud_runs/curriculum/models/full_novel_curriculum/curriculum_phase_summary.json
+```
+
+Its controlled held-out evaluation is stored at:
+
+```text
+benchmark_results/corrected_test_5k/curriculum/benchmark_results.json
+```
+
 ## Inference Usage
 
 After extracting the archive:
@@ -420,23 +563,27 @@ configuration and applies the default source token for general inputs.
 
 ## Known Limitations
 
-- The reported scores are model-selection scores on `val_1p`, not final test
-  performance.
 - The completed run does not measure the incremental contribution of source
   conditioning versus the hierarchical head separately.
-- Curriculum learning is implemented in the codebase but was not evaluated in
-  this completed run.
+- The three-phase curriculum schedule changes both source composition and
+  optimization trajectory; its poor final score does not establish that all
+  curriculum-learning designs will fail.
+- Phase 2 has better validation F1 than phase 3 but has not been reported as a
+  held-out model because it is not the final three-phase curriculum output.
 
 ## Reporting Status
 
-The ten-system controlled `test_5k` comparison has been completed. Report its
-scores as the held-out comparison and retain the `val_1p` scores only as
-model-selection evidence. The benchmark includes `222` BIO continuation spans
-that seqeval treats as new gold entities; this annotation note is documented
-in `docs/corrected-test-5k-benchmark.md`.
+The controlled `test_5k` comparison now includes the eight original
+comparators and three trained models: direct fine-tuning, source-conditioned
+hierarchical fine-tuning, and its curriculum-enabled variant. Report these
+held-out scores as the primary experimental comparison and retain the
+`val_1p` scores only as model-selection evidence. The benchmark includes
+`222` BIO continuation spans that seqeval treats as new gold entities; the
+generated summary records this caveat in `data/test_5k_summary.json`.
 
-Remaining optional analyses are complete-test streaming evaluation and a
-BIO-normalized sensitivity analysis.
+Remaining optional analyses are a BIO-normalized sensitivity analysis and
+evaluation of the retained phase-2 curriculum checkpoint as an early-stopping
+ablation.
 
 ## Result Summary
 
@@ -453,3 +600,8 @@ Recall:    0.74165
 Compared with direct DeBERTa fine-tuning, this improves validation F1 by
 `1.67%` absolute. On the completed held-out `test_5k` comparison, however,
 the same model scores `0.5899` F1 versus direct fine-tuning at `0.6476` F1.
+The curriculum-enabled variant performs more poorly still, scoring `0.2772`
+F1 on `test_5k`, with its degradation appearing after the final
+financial-specialization phase. On the final full-test competition, direct
+fine-tuning scores `0.6455` F1 while SC+H scores `0.5894`, establishing the
+simpler direct model as the strongest completed solution.

@@ -235,8 +235,10 @@ The saved model was written after training:
 Saving best model to models/best_model ...
 ```
 
-Full-test metrics are not available from this run because final full-test
-evaluation was interrupted after training completed.
+The in-training full-test evaluation was interrupted because the default
+Trainer evaluation loop accumulated predictions in memory. The exported model
+was subsequently evaluated successfully with the chunked streaming evaluator
+on the full `100,002`-record test split.
 
 ## Results
 
@@ -265,10 +267,32 @@ The completed controlled comparison on the corrected held-out
 |---|---:|---:|---:|---:|
 | `val_1p` model-selection subset | 994 | 0.6445 | 0.5771 | 0.7298 |
 | `test_5k` controlled comparison subset | 5,000 | **0.6476** | **0.6300** | **0.6662** |
+| Full held-out `test.jsonl` | 100,002 | **0.6455** | **0.6277** | **0.6645** |
 
-On `test_5k`, direct fine-tuned DeBERTa is the strongest of all ten evaluated
-systems. It exceeds the strongest original PIIBench comparator in this new
-benchmark, SpanMarker BERT (`F1 0.1723`), by `0.4753` absolute F1.
+On `test_5k`, direct fine-tuned DeBERTa is the strongest of all eleven
+evaluated systems after inclusion of the curriculum variant. It exceeds the
+strongest original PIIBench comparator in this new benchmark, SpanMarker BERT
+(`F1 0.1723`), by `0.4753` absolute F1. It also exceeds the
+curriculum-enabled source-conditioned hierarchical model (`F1 0.2772`) by
+`0.3704` absolute F1.
+
+The final architecture comparison was run over the full held-out split using
+incremental metric accumulation and 5,000-record host-memory chunks:
+
+| Model | Records | F1 | Precision | Recall |
+|---|---:|---:|---:|---:|
+| **Direct Fine-tuned DeBERTa** | 100,002 | **0.6455** | **0.6277** | **0.6645** |
+| Source-conditioned Hierarchical DeBERTa | 100,002 | 0.5894 | 0.5560 | 0.6270 |
+
+On full-test evaluation, direct fine-tuning exceeds source-conditioned
+hierarchical fine-tuning by `0.0561` F1, `0.0717` precision, and `0.0375`
+recall. This confirms the ranking observed on `test_5k` and supports selecting
+the simpler direct-fine-tuned model as the best-performing approach.
+
+Full-test evaluation was performed locally on an NVIDIA GeForce RTX 4070 with
+8 GB VRAM using `run_streaming_model_benchmark.py`. Direct DeBERTa used CUDA
+minibatches of `8`, completed in `1123.0` seconds, and peaked at `0.955 GiB`
+allocated GPU memory (`1.057 GiB` reserved).
 
 The model was exported as:
 
@@ -303,10 +327,6 @@ print(result.to_dict())
 
 ## Known Limitations
 
-- Final full-test evaluation did not complete due to memory-heavy prediction
-  accumulation in the default Trainer evaluation loop.
-- A final controlled test result is available on `test_5k`; a metric on the
-  complete 100,002-record `test.jsonl` split is not available.
 - The best checkpoint selection is based on the fast validation subset.
-- The controlled benchmark contains BIO continuation irregularities documented
-  in `docs/corrected-test-5k-benchmark.md`.
+- The controlled benchmark contains BIO continuation irregularities recorded
+  in `data/test_5k_summary.json`.
