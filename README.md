@@ -497,6 +497,15 @@ PIIDetectionError
     └── InvalidFieldError
 ```
 
+## Dataset on HuggingFace
+
+- PII-Bench: https://huggingface.co/datasets/Pritesh-2711/pii-bench
+
+## Fine-tuned models
+
+- Direct DeBERTa: https://huggingface.co/Pritesh-2711/piibench-deberta-base
+- Source-conditioned hierarchical DeBERTa: https://huggingface.co/Pritesh-2711/piibench-deberta-sch
+
 ## Author
 
 Pritesh Jha
