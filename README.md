@@ -501,10 +501,16 @@ PIIDetectionError
 
 - PII-Bench: https://huggingface.co/datasets/Pritesh-2711/pii-bench
 
-## Fine-tuned models
+## Fine-tuned models on Huggingface
 
 - Direct DeBERTa: https://huggingface.co/Pritesh-2711/piibench-deberta-base
 - Source-conditioned hierarchical DeBERTa: https://huggingface.co/Pritesh-2711/piibench-deberta-sch
+
+## Support
+
+If this work helps your research or engineering efforts, consider supporting ongoing open-source development and experimentation:
+
+GitHub Sponsors: https://github.com/sponsors/pritesh-2711
 
 ## Author
 
