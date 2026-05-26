@@ -2,6 +2,12 @@
 
 Production-ready PII detection system using a fine-tuned DeBERTa-v3-base token classification model.
 
+## Research Papers
+
+- Dataset : [PIIBench: A Unified Multi-Source Benchmark Corpus for Personally Identifiable Information Detection](!https://arxiv.org/abs/2604.15776)
+
+- Models : [Fine-Tuning Over Architectural Complexity: PII Detection on PIIBench with DeBERTa](!https://arxiv.org/abs/2605.25816)
+
 ## Project Structure
 
 ```
