@@ -80,6 +80,18 @@ python run_data_pipeline.py
 
 This downloads all datasets, normalises them into BIO format, drops rare entity types, and writes stratified 80/10/10 train/val/test splits.
 
+By default, prepared records contain `tokens`, `labels`, and `source`. To also
+include source text for downstream evaluation, redaction, and dataset-card
+publishing, run:
+
+```bash
+python run_data_pipeline.py --include-text
+```
+
+When `--include-text` is used during consolidation, source-native text is
+preserved where the constituent dataset provides it; token-only sources use a
+deterministic whitespace-joined token fallback.
+
 Skip steps you have already run:
 
 ```bash

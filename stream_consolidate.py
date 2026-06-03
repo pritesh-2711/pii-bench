@@ -5,7 +5,7 @@ Streams each dataset directly from HuggingFace (no raw JSONL saved to disk),
 normalises to unified BIO format, and writes consolidated.jsonl + stats.
 
 Usage:
-    python stream_consolidate.py --output-dir /path/to/output
+    python stream_consolidate.py --output-dir /path/to/output --include-text
 """
 
 import json
@@ -34,11 +34,34 @@ def get_hf():
     return load_dataset, get_dataset_config_names
 
 
+def tokens_to_text(tokens):
+    return " ".join(str(tok) for tok in tokens)
+
+
+def get_text(row, *columns):
+    for col in columns:
+        if not col:
+            continue
+        value = row.get(col)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+def make_record(tokens, labels, source, include_text=False, text=""):
+    n = min(len(tokens), len(labels))
+    rec = {"tokens": tokens[:n], "labels": labels[:n], "source": source}
+    if include_text:
+        rec["text"] = text or tokens_to_text(rec["tokens"])
+    return rec
+
+
 # ---------------------------------------------------------------------------
 # Inline readers that yield records (memory-efficient)
 # ---------------------------------------------------------------------------
 
-def yield_bio_records(rows, token_col, label_col, source, label_names=None):
+def yield_bio_records(rows, token_col, label_col, source, label_names=None,
+                      include_text=False, text_col=None):
     for row in rows:
         tokens = row.get(token_col)
         labels = row.get(label_col)
@@ -47,11 +70,17 @@ def yield_bio_records(rows, token_col, label_col, source, label_names=None):
         if label_names and labels and isinstance(labels[0], int):
             labels = [label_names[i] if i < len(label_names) else "O" for i in labels]
         labels = [normalise_label(str(l)) for l in labels]
-        n = min(len(tokens), len(labels))
-        yield {"tokens": tokens[:n], "labels": labels[:n], "source": source}
+        yield make_record(
+            tokens,
+            labels,
+            source,
+            include_text=include_text,
+            text=get_text(row, text_col),
+        )
 
 
-def yield_fewnerd_records(rows, label_names, source="few_nerd"):
+def yield_fewnerd_records(rows, label_names, source="few_nerd",
+                          include_text=False):
     for row in rows:
         tokens = row.get("tokens")
         ner_tags = row.get("ner_tags")
@@ -71,11 +100,16 @@ def yield_fewnerd_records(rows, label_names, source="few_nerd"):
                 else:
                     labels.append(f"B-{canonical}")
                 prev_label = canonical
-        n = min(len(tokens), len(labels))
-        yield {"tokens": tokens[:n], "labels": labels[:n], "source": source}
+        yield make_record(
+            tokens,
+            labels,
+            source,
+            include_text=include_text,
+            text=get_text(row, "text"),
+        )
 
 
-def yield_finer_records(rows):
+def yield_finer_records(rows, include_text=False):
     for row in rows:
         tokens = row.get("tokens")
         ner_tags = row.get("ner_tags")
@@ -89,10 +123,16 @@ def yield_finer_records(rows):
                 labels.append("B-FINANCIAL_ENTITY")
             else:
                 labels.append("I-FINANCIAL_ENTITY")
-        yield {"tokens": tokens, "labels": labels, "source": "finer_139"}
+        yield make_record(
+            tokens,
+            labels,
+            "finer_139",
+            include_text=include_text,
+            text=get_text(row, "text"),
+        )
 
 
-def yield_span_records(rows, text_col, span_col, source):
+def yield_span_records(rows, text_col, span_col, source, include_text=False):
     for row in rows:
         text = row.get(text_col, "")
         spans = parse_span_field(row.get(span_col))
@@ -101,10 +141,16 @@ def yield_span_records(rows, text_col, span_col, source):
         tokens, labels = span_to_bio(text, spans)
         labels = [normalise_label(l) for l in labels]
         if tokens:
-            yield {"tokens": tokens, "labels": labels, "source": source}
+            yield make_record(
+                tokens,
+                labels,
+                source,
+                include_text=include_text,
+                text=text,
+            )
 
 
-def yield_nvidia_records(rows):
+def yield_nvidia_records(rows, include_text=False):
     tag_re = re.compile(r'<(\w+)>(.*?)</\1>', re.DOTALL)
     for row in rows:
         text = row.get("text", "")
@@ -114,6 +160,7 @@ def yield_nvidia_records(rows):
         spans = parse_span_field(spans_raw)
         tokens, labels = span_to_bio(text, spans)
         labels = [normalise_label(l) for l in labels]
+        record_text = text
         has_entities = any(l != "O" for l in labels)
         if not has_entities:
             text_tagged = row.get("text_tagged", "")
@@ -140,8 +187,15 @@ def yield_nvidia_records(rows):
                 if fallback_spans and clean.strip():
                     tokens, labels = span_to_bio(clean, fallback_spans)
                     labels = [normalise_label(l) for l in labels]
+                    record_text = clean
         if tokens:
-            yield {"tokens": tokens, "labels": labels, "source": "nvidia_nemotron"}
+            yield make_record(
+                tokens,
+                labels,
+                "nvidia_nemotron",
+                include_text=include_text,
+                text=record_text,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +242,7 @@ class Stats:
 # Main pipeline
 # ---------------------------------------------------------------------------
 
-def main(output_dir: str):
+def main(output_dir: str, include_text: bool = False):
     load_dataset, get_dataset_config_names = get_hf()
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -210,33 +264,61 @@ def main(output_dir: str):
         # 1. ai4privacy/pii-masking-400k
         print("[1/10] ai4privacy/pii-masking-400k ...")
         ds = load_dataset("ai4privacy/pii-masking-400k", split="train", streaming=False)
-        write_records(yield_bio_records(ds, "mbert_tokens", "mbert_token_classes", "ai4privacy_400k"))
+        write_records(yield_bio_records(
+            ds,
+            "mbert_tokens",
+            "mbert_token_classes",
+            "ai4privacy_400k",
+            include_text=include_text,
+            text_col="source_text",
+        ))
 
         # 2. ai4privacy/pii-masking-300k
         print("[2/10] ai4privacy/pii-masking-300k ...")
         ds = load_dataset("ai4privacy/pii-masking-300k", split="train", streaming=False)
-        write_records(yield_bio_records(ds, "mbert_text_tokens", "mbert_bio_labels", "ai4privacy_300k"))
+        write_records(yield_bio_records(
+            ds,
+            "mbert_text_tokens",
+            "mbert_bio_labels",
+            "ai4privacy_300k",
+            include_text=include_text,
+            text_col="source_text",
+        ))
 
         # 3. gretelai/synthetic_pii_finance_multilingual
         print("[3/10] gretelai/synthetic_pii_finance_multilingual ...")
         for split in ["train", "test"]:
             try:
                 ds = load_dataset("gretelai/synthetic_pii_finance_multilingual", split=split, streaming=False)
-                write_records(yield_span_records(ds, "generated_text", "pii_spans", "gretel_finance"))
+                write_records(yield_span_records(
+                    ds,
+                    "generated_text",
+                    "pii_spans",
+                    "gretel_finance",
+                    include_text=include_text,
+                ))
             except Exception as e:
                 print(f"  split {split} skipped: {e}")
 
         # 4. nvidia/Nemotron-PII
         print("[4/10] nvidia/Nemotron-PII ...")
         ds = load_dataset("nvidia/Nemotron-PII", split="train", streaming=False)
-        write_records(yield_nvidia_records(ds))
+        write_records(yield_nvidia_records(ds, include_text=include_text))
 
         # 5. wikiann (en)
         print("[5/10] wikiann (en) ...")
         wikiann_labels = ["O", "B-PER", "I-PER", "B-ORG", "I-ORG", "B-LOC", "I-LOC"]
         for split in ["train", "validation", "test"]:
             ds = load_dataset("wikiann", "en", split=split, streaming=False)
-            write_records(yield_bio_records(ds, "tokens", "ner_tags", "wikiann", label_names=wikiann_labels))
+            write_records(yield_bio_records(
+                ds,
+                "tokens",
+                "ner_tags",
+                "wikiann",
+                label_names=wikiann_labels,
+                include_text=include_text,
+                text_col="text",
+            ))
 
         # 6. Babelscape/multinerd (en only)
         print("[6/10] Babelscape/multinerd (en) ...")
@@ -250,7 +332,15 @@ def main(output_dir: str):
         ds = load_dataset("Babelscape/multinerd", split="train", verification_mode="no_checks", streaming=False)
         if "lang" in ds.column_names:
             ds = ds.filter(lambda x: x["lang"] == "en")
-        write_records(yield_bio_records(ds, "tokens", "ner_tags", "multinerd", label_names=multinerd_labels))
+        write_records(yield_bio_records(
+            ds,
+            "tokens",
+            "ner_tags",
+            "multinerd",
+            label_names=multinerd_labels,
+            include_text=include_text,
+            text_col="text",
+        ))
 
         # 7. DFKI-SLT/few-nerd
         print("[7/10] DFKI-SLT/few-nerd ...")
@@ -258,7 +348,11 @@ def main(output_dir: str):
                           "organization", "other", "person", "product"]
         for split in ["train", "validation", "test"]:
             ds = load_dataset("DFKI-SLT/few-nerd", "supervised", split=split, streaming=False)
-            write_records(yield_fewnerd_records(ds, fewnerd_labels))
+            write_records(yield_fewnerd_records(
+                ds,
+                fewnerd_labels,
+                include_text=include_text,
+            ))
 
         # 8. conll2003
         print("[8/10] conll2003 ...")
@@ -266,19 +360,34 @@ def main(output_dir: str):
                         "B-LOC", "I-LOC", "B-MISC", "I-MISC"]
         for split in ["train", "validation", "test"]:
             ds = load_dataset("conll2003", split=split, revision="refs/convert/parquet", streaming=False)
-            write_records(yield_bio_records(ds, "tokens", "ner_tags", "conll2003", label_names=conll_labels))
+            write_records(yield_bio_records(
+                ds,
+                "tokens",
+                "ner_tags",
+                "conll2003",
+                label_names=conll_labels,
+                include_text=include_text,
+                text_col="text",
+            ))
 
         # 9. nlpaueb/finer-139
         print("[9/10] nlpaueb/finer-139 ...")
         for split in ["train", "validation", "test"]:
             ds = load_dataset("nlpaueb/finer-139", split=split, revision="refs/convert/parquet", streaming=False)
-            write_records(yield_finer_records(ds))
+            write_records(yield_finer_records(ds, include_text=include_text))
 
         # 10. Isotonic/pii-masking-200k
         print("[10/10] Isotonic/pii-masking-200k ...")
         ds_iso = load_dataset("Isotonic/pii-masking-200k", streaming=False)
         split_key = list(ds_iso.keys())[0]
-        write_records(yield_bio_records(ds_iso[split_key], "tokenised_text", "bio_labels", "isotonic_pii_200k"))
+        write_records(yield_bio_records(
+            ds_iso[split_key],
+            "tokenised_text",
+            "bio_labels",
+            "isotonic_pii_200k",
+            include_text=include_text,
+            text_col="unmasked_text",
+        ))
 
     # Save stats
     stats_dict = stats.to_dict()
@@ -298,5 +407,7 @@ def main(output_dir: str):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-dir", type=str, required=True)
+    parser.add_argument("--include-text", action="store_true",
+                        help="Include source text in consolidated records when available")
     args = parser.parse_args()
-    main(args.output_dir)
+    main(args.output_dir, include_text=args.include_text)

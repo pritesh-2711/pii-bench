@@ -37,6 +37,7 @@ def run_pipeline(
     output_dir: str = "./data",
     skip_download: bool = False,
     skip_consolidate: bool = False,
+    include_text: bool = False,
 ):
     print("=" * 80)
     print("PII DETECTION — DATA PIPELINE")
@@ -67,6 +68,7 @@ def run_pipeline(
         consolidate_datasets(
             data_dir=raw_data_path,
             output_dir=consolidated_path,
+            include_text=include_text,
         )
         print(f"\nConsolidation complete. Output: {consolidated_path}")
     else:
@@ -86,7 +88,7 @@ def run_pipeline(
     dp.CONSOLIDATED_FILE = consolidated_path / "consolidated.jsonl"
     dp.OUTPUT_DIR = output_path
 
-    mapping = prepare_data()
+    mapping = prepare_data(include_text=include_text)
     print(f"\nData preparation complete. Splits saved to: {output_path}")
 
     # ------------------------------------------------------------------
@@ -139,6 +141,11 @@ def main():
         action="store_true",
         help="Skip consolidation and use existing consolidated.jsonl in --consolidated-dir",
     )
+    parser.add_argument(
+        "--include-text",
+        action="store_true",
+        help="Include source text in the consolidated file and prepared JSONL splits",
+    )
 
     args = parser.parse_args()
 
@@ -148,6 +155,7 @@ def main():
         output_dir=args.output_dir,
         skip_download=args.skip_download,
         skip_consolidate=args.skip_consolidate,
+        include_text=args.include_text,
     )
 
 
