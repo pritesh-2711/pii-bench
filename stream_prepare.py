@@ -9,7 +9,8 @@ Does not load the full dataset into memory.
 Usage:
     python stream_prepare.py \
         --consolidated /path/to/consolidated.jsonl \
-        --output-dir   /path/to/splits
+        --output-dir   /path/to/splits \
+        --include-text
 """
 
 import json
@@ -24,6 +25,21 @@ TRAIN_RATIO = 0.8
 VAL_RATIO = 0.1
 SUBSET_FRACTION = 0.01
 RANDOM_SEED = 42
+
+
+def tokens_to_text(tokens: list) -> str:
+    return " ".join(str(tok) for tok in tokens)
+
+
+def normalise_output_record(rec: dict, include_text: bool) -> dict:
+    out = {
+        "tokens": rec["tokens"],
+        "labels": rec["labels"],
+        "source": rec["source"],
+    }
+    if include_text:
+        out["text"] = rec.get("text") or tokens_to_text(rec["tokens"])
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +94,8 @@ def build_label_mapping(kept_types):
 # ---------------------------------------------------------------------------
 
 def pass2(consolidated_path: Path, source_counts: Counter,
-          dropped_types: set, output_dir: Path, seed: int):
+          dropped_types: set, output_dir: Path, seed: int,
+          include_text: bool = False):
     """
     Assign each record to train/val/test based on a deterministic index per source.
     Applies finer_139 cap and rare entity dropping.
@@ -139,6 +156,7 @@ def pass2(consolidated_path: Path, source_counts: Counter,
                 else:
                     new_labels.append("O")
             rec["labels"] = new_labels
+            rec = normalise_output_record(rec, include_text)
 
             # Assign to split
             split_idx = source_indices[src]
@@ -198,7 +216,7 @@ def reservoir_sample(jsonl_path: Path, fraction: float, seed: int) -> list:
 # Main
 # ---------------------------------------------------------------------------
 
-def main(consolidated_path: str, output_dir: str):
+def main(consolidated_path: str, output_dir: str, include_text: bool = False):
     consolidated_path = Path(consolidated_path)
     output_dir = Path(output_dir)
 
@@ -221,7 +239,14 @@ def main(consolidated_path: str, output_dir: str):
     print("\n" + "=" * 60)
     print("PASS 2: Splitting and filtering")
     print("=" * 60)
-    counts = pass2(consolidated_path, source_counts, set(dropped_types), output_dir, RANDOM_SEED)
+    counts = pass2(
+        consolidated_path,
+        source_counts,
+        set(dropped_types),
+        output_dir,
+        RANDOM_SEED,
+        include_text=include_text,
+    )
     print(f"  train : {counts['train']:,}")
     print(f"  val   : {counts['val']:,}")
     print(f"  test  : {counts['test']:,}")
@@ -270,5 +295,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--consolidated", type=str, required=True)
     parser.add_argument("--output-dir",   type=str, required=True)
+    parser.add_argument("--include-text", action="store_true",
+                        help="Include a text field in each prepared record")
     args = parser.parse_args()
-    main(args.consolidated, args.output_dir)
+    main(args.consolidated, args.output_dir, include_text=args.include_text)

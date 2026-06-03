@@ -20,8 +20,12 @@ The 1p subsets are stratified by source so entity type distribution matches
 the full splits. They are written once here and never regenerated unless you
 re-run data preparation. Arrow pre-tokenization targets these subsets, not
 the full val/test splits, so pre-tokenization is fast (~seconds).
+
+By default, prepared records keep the compact trainable schema:
+tokens, labels, source. Pass --include-text to also write a text field.
 """
 
+import argparse
 import json
 import random
 from collections import Counter, defaultdict
@@ -39,6 +43,25 @@ VAL_RATIO = 0.1
 SUBSET_FRACTION = 0.01   # 1% of val/test for fast intra-training eval
 PAPER_EVAL_SUBSET_SIZE = 5_000
 RANDOM_SEED = 42
+
+
+def tokens_to_text(tokens: list) -> str:
+    return " ".join(str(tok) for tok in tokens)
+
+
+def normalise_output_record(rec: dict, include_text: bool) -> dict:
+    out = {
+        "tokens": rec["tokens"],
+        "labels": rec["labels"],
+        "source": rec["source"],
+    }
+    if include_text:
+        out["text"] = rec.get("text") or tokens_to_text(rec["tokens"])
+    return out
+
+
+def normalise_output_records(records: list, include_text: bool) -> list:
+    return [normalise_output_record(rec, include_text) for rec in records]
 
 
 # ---------------------------------------------------------------------------
@@ -104,11 +127,9 @@ def drop_rare_entities(records: list, threshold: int) -> tuple:
                     new_labels.append("O" if etype in dropped_types else lbl)
                 else:
                     new_labels.append("O")
-            updated.append({
-                "tokens": rec["tokens"],
-                "labels": new_labels,
-                "source": rec["source"],
-            })
+            updated_rec = dict(rec)
+            updated_rec["labels"] = new_labels
+            updated.append(updated_rec)
         records = updated
     else:
         print("\nNo rare entity types to drop.")
@@ -319,7 +340,7 @@ def save_split(records: list, path: Path):
 # Main
 # ---------------------------------------------------------------------------
 
-def prepare():
+def prepare(include_text: bool = False):
     random.seed(RANDOM_SEED)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -329,6 +350,17 @@ def prepare():
 
     # 1. Load
     records = load_consolidated(CONSOLIDATED_FILE)
+    if include_text:
+        with_source_text = sum(1 for rec in records if rec.get("text"))
+        if with_source_text == 0:
+            print(
+                "WARNING: --include-text requested, but consolidated records "
+                "do not contain text. Falling back to ' '.join(tokens). "
+                "Re-run consolidation with --include-text to preserve "
+                "source-native text where available."
+            )
+        else:
+            print(f"Text available in {with_source_text:,}/{len(records):,} consolidated records.")
 
     # 2. Cap finer_139
     print(f"\nCapping finer_139 to {FINER_CAP:,} records ...")
@@ -351,9 +383,14 @@ def prepare():
 
     # 6. Stratified split
     train, val, test = stratified_split(records, TRAIN_RATIO, VAL_RATIO, RANDOM_SEED)
+    train = normalise_output_records(train, include_text)
+    val = normalise_output_records(val, include_text)
+    test = normalise_output_records(test, include_text)
 
     # 7. Save full splits
     print("\nSaving splits ...")
+    if include_text:
+        print("  Including text field in prepared records.")
     save_split(train, OUTPUT_DIR / "train.jsonl")
     save_split(val,   OUTPUT_DIR / "val.jsonl")
     save_split(test,  OUTPUT_DIR / "test.jsonl")
@@ -413,4 +450,10 @@ def prepare():
 
 
 if __name__ == "__main__":
-    prepare()
+    parser = argparse.ArgumentParser(
+        description="Prepare train/val/test PIIBench JSONL splits"
+    )
+    parser.add_argument("--include-text", action="store_true",
+                        help="Include a text field in each prepared record")
+    args = parser.parse_args()
+    prepare(include_text=args.include_text)

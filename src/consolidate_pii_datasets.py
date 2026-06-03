@@ -9,7 +9,8 @@ Output schema (one JSON object per line):
   {
     "tokens":  ["Pritesh", "works", "at", "XYZ-Corp"],
     "labels":  ["B-PERSON", "O", "O", "B-ORG"],
-    "source":  "conll2003"
+    "source":  "conll2003",
+    "text":    "Pritesh works at XYZ-Corp"  # with --include-text
   }
 
 Usage:
@@ -30,6 +31,33 @@ import json
 import argparse
 from pathlib import Path
 from collections import defaultdict
+
+
+def tokens_to_text(tokens: list) -> str:
+    return " ".join(str(tok) for tok in tokens)
+
+
+def get_text(row: dict, *columns: str) -> str:
+    for col in columns:
+        if not col:
+            continue
+        value = row.get(col)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+def make_record(tokens: list, labels: list, source: str,
+                include_text: bool = False, text: str = "") -> dict:
+    min_len = min(len(tokens), len(labels))
+    rec = {
+        "tokens": tokens[:min_len],
+        "labels": labels[:min_len],
+        "source": source,
+    }
+    if include_text:
+        rec["text"] = text or tokens_to_text(rec["tokens"])
+    return rec
 
 # ---------------------------------------------------------------------------
 # Entity label normalisation map
@@ -323,7 +351,8 @@ def parse_span_field(raw) -> list:
 # ---------------------------------------------------------------------------
 
 def read_bio_jsonl(filepath: Path, token_col: str, label_col: str,
-                   source: str, label_names: list = None) -> list:
+                   source: str, label_names: list = None,
+                   include_text: bool = False, text_col: str = None) -> list:
     """
     Generic reader for datasets with tokens + BIO labels (or integer ids).
     """
@@ -344,16 +373,18 @@ def read_bio_jsonl(filepath: Path, token_col: str, label_col: str,
 
             labels = [normalise_label(str(l)) for l in labels]
 
-            min_len = min(len(tokens), len(labels))
-            records.append({
-                "tokens": tokens[:min_len],
-                "labels": labels[:min_len],
-                "source": source,
-            })
+            records.append(make_record(
+                tokens,
+                labels,
+                source,
+                include_text=include_text,
+                text=get_text(row, text_col),
+            ))
     return records
 
 
-def read_bio_jsonl_fewnerd(filepath: Path, source: str, label_names: list) -> list:
+def read_bio_jsonl_fewnerd(filepath: Path, source: str, label_names: list,
+                           include_text: bool = False) -> list:
     """
     FIX: few-nerd reader.
 
@@ -393,16 +424,18 @@ def read_bio_jsonl_fewnerd(filepath: Path, source: str, label_names: list) -> li
                         labels.append(f"B-{canonical}")
                     prev_label = canonical
 
-            min_len = min(len(tokens), len(labels))
-            records.append({
-                "tokens": tokens[:min_len],
-                "labels": labels[:min_len],
-                "source": source,
-            })
+            records.append(make_record(
+                tokens,
+                labels,
+                source,
+                include_text=include_text,
+                text=get_text(row, "text"),
+            ))
     return records
 
 
-def read_span_jsonl(filepath: Path, text_col: str, span_col: str, source: str) -> list:
+def read_span_jsonl(filepath: Path, text_col: str, span_col: str, source: str,
+                    include_text: bool = False) -> list:
     """
     Reader for datasets with raw text + character-offset span annotations.
     """
@@ -423,11 +456,17 @@ def read_span_jsonl(filepath: Path, text_col: str, span_col: str, source: str) -
             labels = [normalise_label(l) for l in labels]
 
             if tokens:
-                records.append({"tokens": tokens, "labels": labels, "source": source})
+                records.append(make_record(
+                    tokens,
+                    labels,
+                    source,
+                    include_text=include_text,
+                    text=text,
+                ))
     return records
 
 
-def read_nvidia_jsonl(filepath: Path) -> list:
+def read_nvidia_jsonl(filepath: Path, include_text: bool = False) -> list:
     """
     FIX: nvidia/Nemotron-PII reader.
 
@@ -458,6 +497,7 @@ def read_nvidia_jsonl(filepath: Path) -> list:
             spans = parse_span_field(spans_raw)
             tokens, labels = span_to_bio(text, spans)
             labels = [normalise_label(l) for l in labels]
+            record_text = text
 
             # Fallback: if no entities found and text_tagged is available, parse
             # Nemotron's "[value]label" inline format.
@@ -489,13 +529,20 @@ def read_nvidia_jsonl(filepath: Path) -> list:
                     if fallback_spans and clean.strip():
                         tokens, labels = span_to_bio(clean, fallback_spans)
                         labels = [normalise_label(l) for l in labels]
+                        record_text = clean
 
             if tokens:
-                records.append({"tokens": tokens, "labels": labels, "source": "nvidia_nemotron"})
+                records.append(make_record(
+                    tokens,
+                    labels,
+                    "nvidia_nemotron",
+                    include_text=include_text,
+                    text=record_text,
+                ))
     return records
 
 
-def read_finer_jsonl(filepath: Path) -> list:
+def read_finer_jsonl(filepath: Path, include_text: bool = False) -> list:
     """
     finer-139: integer tags, 0=O, odd=B-FINANCIAL_ENTITY, even(>0)=I-FINANCIAL_ENTITY.
     """
@@ -520,7 +567,13 @@ def read_finer_jsonl(filepath: Path) -> list:
                 else:
                     labels.append("I-FINANCIAL_ENTITY")
 
-            records.append({"tokens": tokens, "labels": labels, "source": "finer_139"})
+            records.append(make_record(
+                tokens,
+                labels,
+                "finer_139",
+                include_text=include_text,
+                text=get_text(row, "text"),
+            ))
     return records
 
 
@@ -548,7 +601,7 @@ def collect_unique_entities(all_records: list) -> tuple:
 # Main
 # ---------------------------------------------------------------------------
 
-def main(data_dir: Path, output_dir: Path):
+def main(data_dir: Path, output_dir: Path, include_text: bool = False):
     output_dir.mkdir(parents=True, exist_ok=True)
 
     all_records = []
@@ -558,7 +611,14 @@ def main(data_dir: Path, output_dir: Path):
     p = data_dir / "ai4privacy_400k" / "train.jsonl"
     if p.exists():
         print(f"Reading {p} ...")
-        recs = read_bio_jsonl(p, "mbert_tokens", "mbert_token_classes", "ai4privacy_400k")
+        recs = read_bio_jsonl(
+            p,
+            "mbert_tokens",
+            "mbert_token_classes",
+            "ai4privacy_400k",
+            include_text=include_text,
+            text_col="source_text",
+        )
         print(f"  {len(recs):,} records")
         all_records.extend(recs)
     else:
@@ -568,7 +628,14 @@ def main(data_dir: Path, output_dir: Path):
     p = data_dir / "ai4privacy_300k" / "train.jsonl"
     if p.exists():
         print(f"Reading {p} ...")
-        recs = read_bio_jsonl(p, "mbert_text_tokens", "mbert_bio_labels", "ai4privacy_300k")
+        recs = read_bio_jsonl(
+            p,
+            "mbert_text_tokens",
+            "mbert_bio_labels",
+            "ai4privacy_300k",
+            include_text=include_text,
+            text_col="source_text",
+        )
         print(f"  {len(recs):,} records")
         all_records.extend(recs)
     else:
@@ -579,7 +646,13 @@ def main(data_dir: Path, output_dir: Path):
         p = data_dir / "gretel_finance" / f"{split}.jsonl"
         if p.exists():
             print(f"Reading {p} ...")
-            recs = read_span_jsonl(p, "generated_text", "pii_spans", "gretel_finance")
+            recs = read_span_jsonl(
+                p,
+                "generated_text",
+                "pii_spans",
+                "gretel_finance",
+                include_text=include_text,
+            )
             print(f"  {len(recs):,} records")
             all_records.extend(recs)
 
@@ -587,7 +660,7 @@ def main(data_dir: Path, output_dir: Path):
     p = data_dir / "nvidia_nemotron" / "train.jsonl"
     if p.exists():
         print(f"Reading {p} ...")
-        recs = read_nvidia_jsonl(p)
+        recs = read_nvidia_jsonl(p, include_text=include_text)
         print(f"  {len(recs):,} records")
         all_records.extend(recs)
     else:
@@ -599,7 +672,15 @@ def main(data_dir: Path, output_dir: Path):
         p = data_dir / "wikiann" / f"{split}.jsonl"
         if p.exists():
             print(f"Reading {p} ...")
-            recs = read_bio_jsonl(p, "tokens", "ner_tags", "wikiann", label_names=wikiann_labels)
+            recs = read_bio_jsonl(
+                p,
+                "tokens",
+                "ner_tags",
+                "wikiann",
+                label_names=wikiann_labels,
+                include_text=include_text,
+                text_col="text",
+            )
             print(f"  {len(recs):,} records")
             all_records.extend(recs)
 
@@ -615,7 +696,15 @@ def main(data_dir: Path, output_dir: Path):
     p = data_dir / "multinerd" / "train_en.jsonl"
     if p.exists():
         print(f"Reading {p} ...")
-        recs = read_bio_jsonl(p, "tokens", "ner_tags", "multinerd", label_names=multinerd_labels)
+        recs = read_bio_jsonl(
+            p,
+            "tokens",
+            "ner_tags",
+            "multinerd",
+            label_names=multinerd_labels,
+            include_text=include_text,
+            text_col="text",
+        )
         print(f"  {len(recs):,} records")
         all_records.extend(recs)
     else:
@@ -629,7 +718,12 @@ def main(data_dir: Path, output_dir: Path):
         p = data_dir / "few_nerd" / f"{split}.jsonl"
         if p.exists():
             print(f"Reading {p} ...")
-            recs = read_bio_jsonl_fewnerd(p, "few_nerd", fewnerd_labels)
+            recs = read_bio_jsonl_fewnerd(
+                p,
+                "few_nerd",
+                fewnerd_labels,
+                include_text=include_text,
+            )
             print(f"  {len(recs):,} records")
             all_records.extend(recs)
 
@@ -640,7 +734,15 @@ def main(data_dir: Path, output_dir: Path):
         p = data_dir / "conll2003" / f"{split}.jsonl"
         if p.exists():
             print(f"Reading {p} ...")
-            recs = read_bio_jsonl(p, "tokens", "ner_tags", "conll2003", label_names=conll_labels)
+            recs = read_bio_jsonl(
+                p,
+                "tokens",
+                "ner_tags",
+                "conll2003",
+                label_names=conll_labels,
+                include_text=include_text,
+                text_col="text",
+            )
             print(f"  {len(recs):,} records")
             all_records.extend(recs)
 
@@ -649,7 +751,7 @@ def main(data_dir: Path, output_dir: Path):
         p = data_dir / "finer_139" / f"{split}.jsonl"
         if p.exists():
             print(f"Reading {p} ...")
-            recs = read_finer_jsonl(p)
+            recs = read_finer_jsonl(p, include_text=include_text)
             print(f"  {len(recs):,} records")
             all_records.extend(recs)
 
@@ -657,7 +759,14 @@ def main(data_dir: Path, output_dir: Path):
     p = data_dir / "isotonic_pii_200k" / "train.jsonl"
     if p.exists():
         print(f"Reading {p} ...")
-        recs = read_bio_jsonl(p, "tokenised_text", "bio_labels", "isotonic_pii_200k")
+        recs = read_bio_jsonl(
+            p,
+            "tokenised_text",
+            "bio_labels",
+            "isotonic_pii_200k",
+            include_text=include_text,
+            text_col="unmasked_text",
+        )
         print(f"  {len(recs):,} records")
         all_records.extend(recs)
     else:
@@ -727,5 +836,7 @@ if __name__ == "__main__":
                         help="Root directory containing downloaded dataset folders")
     parser.add_argument("--output-dir", type=str, default="./pii_datasets/consolidated",
                         help="Directory to write consolidated output")
+    parser.add_argument("--include-text", action="store_true",
+                        help="Include source text in consolidated records when available")
     args = parser.parse_args()
-    main(Path(args.data_dir), Path(args.output_dir))
+    main(Path(args.data_dir), Path(args.output_dir), include_text=args.include_text)
